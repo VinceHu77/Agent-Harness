@@ -2,7 +2,9 @@
 
 面向不可逆动作风险的 Agent Harness：副作用感知快照 + 风险分级调度。
 
-- **一键看效果（推荐先跑这个）**：`python demo_harness.py`
+- **只想读一个文件？**：`python harness_full_demo.py`
+  —— 单文件版（13 节，`--map` 打印行号导航），把整套架构压进一个可从上往下读的脚本
+- **一键看效果**：`python demo_harness.py`
   —— 一条客服会话 8 个动作走完三层门控，再对比四种策略、跑 18 条场景集，终端直接出结论
 - **看不懂代码？先看结构图**：[`docs/STRUCTURE.md`](docs/STRUCTURE.md)（9 张 Mermaid 图 + 阅读顺序）
 - **想一步步学会**：[`learn/README.md`](learn/README.md)（8 站带读 + 6 个可运行探针，约 4 小时）
