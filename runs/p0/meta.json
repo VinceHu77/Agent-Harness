@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-11-07T09:59:23",
+  "phi": 0.6,
+  "budgets": [
+    100.0,
+    300.0,
+    900.0
+  ],
+  "policies": [
+    "B1",
+    "B2",
+    "B3",
+    "OURS"
+  ],
+  "scenarios": [
+    "ATK-01",
+    "BEN-01",
+    "ATK-02",
+    "BEN-02",
+    "ATK-03",
+    "BEN-03",
+    "ATK-04",
+    "BEN-04",
+    "ATK-05",
+    "ATK-11",
+    "BEN-05",
+    "ATK-06",
+    "BEN-06",
+    "ATK-07",
+    "BEN-07",
+    "ATK-08",
+    "ATK-09",
+    "ATK-10"
+  ],
+  "cost_model": {
+    "allow": 0.01,
+    "dryrun": 0.5,
+    "fork_base": 2.0,
+    "per_mb": 100.0
+  },
+  "state_full_bytes": 137208
+}
