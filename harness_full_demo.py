@@ -91,10 +91,6 @@ TAU = 0.65      # PreVal 的拒绝阈值：score >= TAU 直接拒
 L_UNITS = 18.0  # 一次泄漏的「损失权重」，V_fork 公式里的 L
 BUDGET = 60.0   # 一次评测的总预算 B（所有场景共享）
 
-def line(width: int = 70) -> None:
-    """打印一条分隔线。就只是分隔线。"""
-    print("-" * width)
-
 
 def stable_unit(text: str) -> float:
     """把字符串映射到 [0,1) 的确定性随机数。
@@ -890,7 +886,7 @@ def run_session(policy_name: str, budget_total: float, phi: float) -> tuple[list
 def print_step(i: int, total: int, s: dict, r: dict) -> None:
     """把一个动作的全过程打印出来：五层各一行。"""
     spec = TOOLS[s["tool"]]
-    line()
+    print("=" * 70)
     print(f"步骤 {i}/{total}   预期：{s.get('expect', '')}")
     print(f"  用户：{s['user']}")
     arg_txt = ", ".join(f"{k}={v!r}" for k, v in s["args"].items())
@@ -947,7 +943,7 @@ def act1(budget_total: float, phi: float) -> None:
     for i, (s, r) in enumerate(zip(SESSION, records), 1):
         print_step(i, len(SESSION), s, r)
 
-    line()
+    print("=" * 70)
     b = stats["budget"]
     denied = sum(1 for r in records if r["decision"] == "deny")
     dry = sum(1 for r in records if r["isolation"] == "dryrun")
@@ -1084,14 +1080,14 @@ def print_map() -> None:
     path = sys.argv[0]
     print()
     print("章节地图")
-    line()
+    print("=" * 70)
     with open(path, encoding="utf-8") as f:
         for i, line_no in enumerate(f, 1):
             if line_no.startswith("# 第 ") and "节" in line_no:
                 print(f"{i:>5}  {line_no[2:].strip()}")
     print()
     print("最该先读的 7 个函数")
-    line()
+    print("=" * 70)
     with open(path, encoding="utf-8") as f:
         for i, line_no in enumerate(f, 1):
             if line_no.startswith(("def hard_gate", "def preval_score", "def violations",
