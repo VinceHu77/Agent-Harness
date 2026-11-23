@@ -221,3 +221,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- 运行时轨迹（trace）----
+# 只忽略 runs/ 下的 jsonl；runs/p0*/*.csv 是实验结果，仍然入库
+**/runs/*.jsonl
+

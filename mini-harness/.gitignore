@@ -1,0 +1,15 @@
+# 运行时产物
+runs/
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# 本地备份
+.backup-before-refactor/

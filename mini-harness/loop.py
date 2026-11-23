@@ -1,20 +1,24 @@
-"""循环层:harness 的核心状态机。
+"""循环层：harness 的核心状态机。
 
-模型只会"说"(生成 token)。这一层的全部工作,是决定它"说完之后发生什么":
+模型只会「说」（生成 token）。这一层的全部工作，是决定它「说完之后发生什么」：
 
-    拼上下文 -> 调模型 -> 有 tool_calls?
-                            ├─ 没有 -> 这就是最终答复,结束
-                            └─ 有   -> 执行 -> 把结果作为 role=tool 消息追加 -> 再调模型
+    拼上下文 → 调模型 → 有 tool_calls?
+                          ├─ 没有 → 这就是最终答复，结束
+                          └─ 有   → 执行 → 结果作为 role=tool 追加 → 再调模型
 
-外加三件让循环"能跑完"的事:上下文预算、轮数上限、错误回填。
+外加三件让循环「能跑完」的事：上下文预算、轮数上限、错误回填。
 """
+
 from __future__ import annotations
 
-import json
-from typing import Callable
+import os
+from functools import lru_cache
+from typing import Any, Callable
 
 from llm import ChatClient, LLMError
 from tools import ToolRegistry
+
+__all__ = ["Agent", "SYSTEM_PROMPT", "count_tokens", "fit_context"]
 
 SYSTEM_PROMPT = """你是运行在用户本地机器上的编码 agent,通过工具与文件系统、shell 交互。
 
@@ -30,7 +34,84 @@ SYSTEM_PROMPT = """你是运行在用户本地机器上的编码 agent,通过工
 """
 
 
+# ---------------------------------------------------------------------------
+# token 计数：tiktoken 有就用，没有就退化成字符估算
+# ---------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def _encoder() -> Any | None:
+    """返回 tiktoken 编码器；不可用时返回 None（只尝试一次）。
+
+    默认**不启用**：`encoding_for_model()` 在词表缺失时会联网下载，
+    网络不通就会卡住（实测首次调用可能超过 60 秒）。
+    需要精确计数时显式开启：
+
+        pip install tiktoken
+        export MINI_HARNESS_TOKENIZER=on
+    """
+    mode = os.environ.get("MINI_HARNESS_TOKENIZER", "off").strip().lower()
+    if mode not in ("1", "on", "true", "auto"):
+        return None
+    try:
+        import tiktoken  # 可选依赖
+    except ImportError:
+        return None
+    try:
+        return tiktoken.encoding_for_model("gpt-4")
+    except Exception:  # 词表下载失败、版本不兼容等
+        return None
+
+
+def _text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    enc = _encoder()
+    if enc is None:
+        return max(1, len(text) // 2)  # 兜底：2 字符 ≈ 1 token
+    return len(enc.encode(text))
+
+
+def count_tokens(messages: list[dict]) -> int:
+    """按 OpenAI messages 的官方口径估算一组消息的 token 数。"""
+    total = 0
+    for msg in messages:
+        total += 4  # 每条消息的协议开销
+        for key, value in msg.items():
+            total += _text_tokens(str(value))
+            if key == "name":
+                total -= 1
+    return total + 2  # 结尾 assistant 前缀的固定开销
+
+
+def fit_context(messages: list[dict], budget_tokens: int) -> list[dict]:
+    """按 token 预算裁剪上下文。
+
+    保留 system 和第一条 user（任务目标），从最旧的一「轮」开始丢。
+    以 assistant 为界整段丢弃（连同其后的 tool 消息），避免留下孤立的
+    ``tool_call_id`` —— 那会被模型服务拒绝（400）。
+    """
+    if count_tokens(messages) <= budget_tokens or len(messages) <= 3:
+        return messages
+
+    head, rest = messages[0], messages[1:]
+    task = rest[0] if rest and rest[0].get("role") == "user" else None
+    body = rest[1:] if task else rest
+    kept = [head] + ([task] if task else [])
+
+    while body and count_tokens(kept + body) > budget_tokens:
+        if body[0].get("role") == "assistant":
+            i = 1
+            while i < len(body) and body[i].get("role") == "tool":
+                i += 1
+            body = body[i:]
+        else:
+            body = body[1:]
+
+    return kept + body
+
+
 class Agent:
+    """一次对话的完整状态：历史、预算、轮数上限、事件回调。"""
+
     def __init__(
         self,
         client: ChatClient,
@@ -38,25 +119,27 @@ class Agent:
         *,
         system_prompt: str = SYSTEM_PROMPT,
         max_turns: int = 20,
-        context_chars: int = 20000,
+        context_tokens: int = 7000,
         on_event: Callable[[dict], None] | None = None,
-    ):
+    ) -> None:
         self.client = client
         self.tools = tools
         self.system_prompt = system_prompt
         self.max_turns = max_turns
-        self.context_chars = context_chars
+        self.context_tokens = context_tokens
         self.on_event = on_event
 
     def run(self, task: str) -> str:
+        """执行一个任务，返回最终答复（或失败说明）。"""
         messages: list[dict] = [
-            {"role": "system", "content": self.system_prompt.format(workspace=self.tools.workspace)},
+            {"role": "system",
+             "content": self.system_prompt.format(workspace=self.tools.workspace)},
             {"role": "user", "content": task},
         ]
         last_text = ""
 
         for turn in range(1, self.max_turns + 1):
-            messages = fit_context(messages, self.context_chars)
+            messages = fit_context(messages, self.context_tokens)
             self._emit("request", turn=turn, messages=messages)
 
             try:
@@ -66,7 +149,10 @@ class Agent:
 
             self._emit(
                 "response", turn=turn, content=comp.content, usage=comp.usage,
-                tool_calls=[{"id": c.id, "name": c.name, "arguments": c.arguments} for c in comp.tool_calls],
+                tool_calls=[
+                    {"id": c.id, "name": c.name, "arguments": c.arguments}
+                    for c in comp.tool_calls
+                ],
             )
             last_text = comp.content
 
@@ -84,7 +170,10 @@ class Agent:
 
             if not comp.tool_calls:
                 if comp.finish_reason == "length":
-                    return (comp.content + "\n[harness] 输出达到 max_tokens 上限,可能被截断。").strip()
+                    return (
+                        comp.content
+                        + "\n[harness] 输出达到 max_tokens 上限,可能被截断。"
+                    ).strip()
                 return comp.content or "(模型没有返回内容)"
 
             for call in comp.tool_calls:
@@ -93,40 +182,12 @@ class Agent:
                     "tool", turn=turn, name=call.name,
                     arguments=call.arguments, result=result,
                 )
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": result}
+                )
 
         return f"[harness] 达到最大轮数 {self.max_turns},任务未完成。最后输出:\n{last_text}"
 
     def _emit(self, kind: str, **data) -> None:
         if self.on_event:
             self.on_event({"kind": kind, **data})
-
-
-def fit_context(messages: list[dict], budget_chars: int) -> list[dict]:
-    """按字符预算裁剪上下文。
-
-    保留 system 和第一条 user(任务目标),从最旧的一"轮"开始丢。
-    以 assistant 为界整段丢弃(连同其后的 tool 消息),避免留下孤立的
-    tool_call_id —— 那会被模型服务拒绝。
-    """
-    if _size(messages) <= budget_chars or len(messages) <= 3:
-        return messages
-
-    head, rest = messages[0], messages[1:]
-    task = rest[0] if rest and rest[0].get("role") == "user" else None
-    body = rest[1:] if task else rest
-
-    while body and _size([head] + ([task] if task else []) + body) > budget_chars:
-        if body[0].get("role") == "assistant":
-            i = 1
-            while i < len(body) and body[i].get("role") == "tool":
-                i += 1
-            body = body[i:]
-        else:
-            body = body[1:]
-
-    return [head] + ([task] if task else []) + body
-
-
-def _size(messages: list[dict]) -> int:
-    return len(json.dumps(messages, ensure_ascii=False))
