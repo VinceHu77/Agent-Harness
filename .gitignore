@@ -11,5 +11,3 @@ venv/
 build/
 dist/
 
-# 本地备份
-.backup-before-refactor/
