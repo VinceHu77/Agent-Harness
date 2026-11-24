@@ -69,13 +69,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="最小完整 agent harness(OpenAI 兼容)")
     p.add_argument("task", nargs="*", help="一次性任务;留空进入 REPL")
     p.add_argument("--version", action="version", version=f"mini-harness {__version__}")
-    p.add_argument("--base-url", default=DEFAULT_BASE_URL,
-                   help="OpenAI 兼容端点根地址(默认 %(default)s)")
+    p.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI 兼容端点根地址(默认 %(default)s)")
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--workspace", default=".", help="工具可访问的根目录,默认当前目录")
     p.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="最多几轮工具调用")
-    p.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS,
-                   help="上下文裁剪预算(token)")
+    p.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS, help="上下文裁剪预算(token)")
     p.add_argument("--ask", action="store_true", help="每次执行 shell 前人工确认")
     p.add_argument("--no-shell", action="store_true", help="禁用 run_bash")
     p.add_argument("--allow-dangerous", action="store_true", help="允许危险命令(慎用)")
