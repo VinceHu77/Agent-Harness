@@ -36,14 +36,11 @@ DEFAULT_TRACE_DIR = Path("runs")
 
 
 def one_line(text: str, n: int) -> str:
-    """把多行文本压成单行并截断，用于终端展示。"""
     flat = " ".join(str(text).split())
     return flat if len(flat) <= n else flat[: n - 1] + "…"
 
 
 class Tracer:
-    """把 Agent 事件同时打印到终端，并写入 JSONL trace（可观测性）。"""
-
     def __init__(self, trace_path: Path | None) -> None:
         self.trace_path = trace_path
 
@@ -59,12 +56,9 @@ class Tracer:
 
         if not self.trace_path:
             return
-        try:
-            line = json.dumps({"t": time.strftime("%H:%M:%S"), **event}, ensure_ascii=False)
-            with self.trace_path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-        except OSError:
-            pass  # 轨迹写失败不应该影响主流程
+        line = json.dumps({"t": time.strftime("%H:%M:%S"), **event}, ensure_ascii=False)
+        with self.trace_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -76,10 +70,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--workspace", default=".", help="工具可访问的根目录,默认当前目录")
     p.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="最多几轮工具调用")
     p.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS, help="上下文裁剪预算(token)")
-    p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
-                   help="采样温度,默认 0(工具调用更稳定)")
-    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
-                   help="单轮输出上限,默认 8192")
+    p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="采样温度,默认 0(工具调用更稳定)")
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="单轮输出上限,默认 8192")
     p.add_argument("--ask", action="store_true", help="每次执行 shell 前人工确认")
     p.add_argument("--no-shell", action="store_true", help="禁用 run_bash")
     p.add_argument("--allow-dangerous", action="store_true", help="允许危险命令(慎用)")
@@ -88,17 +80,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
-    """装配 Agent；工作区不合法时直接退出。"""
     workspace = Path(args.workspace).resolve()
     if not workspace.is_dir():
         sys.exit(f"工作区不存在: {workspace}")
 
-    trace_path: Path | None = None
-    try:
-        args.trace_dir.mkdir(parents=True, exist_ok=True)
-        trace_path = args.trace_dir / time.strftime("run-%Y%m%d-%H%M%S.jsonl")
-    except OSError:
-        trace_path = None
+    args.trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = args.trace_dir / time.strftime("run-%Y%m%d-%H%M%S.jsonl")
 
     client = ChatClient(
         args.base_url, args.model,
@@ -121,7 +108,6 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
 
 
 def repl(agent: Agent) -> None:
-    """交互模式：读一行、跑一次，直到 /exit 或 Ctrl-D。"""
     print("交互模式:输入任务,/exit 退出。")
     while True:
         try:
