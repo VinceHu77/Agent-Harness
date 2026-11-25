@@ -42,6 +42,7 @@ class Agent:
         client: ChatClient,
         tools: ToolRegistry,
         *,
+        on_text: Callable[[str], None],
         system_prompt: str = SYSTEM_PROMPT,
         max_turns: int = 20,
         context_tokens: int = 7000,
@@ -49,15 +50,16 @@ class Agent:
     ) -> None:
         self.client = client
         self.tools = tools
+        self.on_text = on_text
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.context_tokens = context_tokens
         self.on_event = on_event
 
-    def run(self, task: str, on_text: Callable[[str], None]) -> str:
+    def run(self, task: str) -> str:
         """执行一个任务，返回最终答复（或失败说明）。
 
-        始终走流式：模型生成的文本片段会实时回调给 ``on_text``。
+        始终走流式：文本片段会实时回调给构造时注入的 ``on_text``。
         """
         messages: list[dict] = [
             {"role": "system", "content": self.system_prompt.format(workspace=self.tools.workspace)},
@@ -83,7 +85,7 @@ class Agent:
                     messages,
                     tools=self.tools.schemas(),
                     stream=True,
-                    on_text=on_text,
+                    on_text=self.on_text,
                 )
             except LLMError as exc:
                 return f"[harness] 模型调用失败:{exc}"

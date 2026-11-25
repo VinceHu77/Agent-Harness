@@ -12,8 +12,8 @@ class FakeAgent:
     def __init__(self) -> None:
         self.seen: list = []
 
-    def run(self, task: str, on_text) -> str:
-        self.seen.append((task, on_text))
+    def run(self, task: str) -> str:
+        self.seen.append(task)
         return "ok"
 
 
@@ -33,10 +33,7 @@ class TestRepl(unittest.TestCase):
                 mock.patch("builtins.print"):
             harness.repl(agent)
 
-        self.assertEqual(len(agent.seen), 1)
-        task, on_text = agent.seen[0]
-        self.assertEqual(task, "你好")
-        self.assertTrue(callable(on_text))
+        self.assertEqual(agent.seen, ["你好"])
 
 
 if __name__ == "__main__":

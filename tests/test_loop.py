@@ -41,8 +41,8 @@ class TestAgent(unittest.TestCase):
     def test_direct_answer(self) -> None:
         events: list[dict] = []
         agent = Agent(FakeClient([Completion(content="done")]), self.tools,
-                      on_event=events.append)
-        self.assertEqual(agent.run("hi", on_text=_noop), "done")
+                      on_text=_noop, on_event=events.append)
+        self.assertEqual(agent.run("hi"), "done")
         self.assertEqual([e["kind"] for e in events], ["request", "response"])
 
     def test_tool_call_roundtrip(self) -> None:
@@ -50,8 +50,8 @@ class TestAgent(unittest.TestCase):
             Completion(content="", tool_calls=[ToolCall("c1", "list_dir", "{}")]),
             Completion(content="ok"),
         ])
-        agent = Agent(client, self.tools)
-        self.assertEqual(agent.run("看看目录", on_text=_noop), "ok")
+        agent = Agent(client, self.tools, on_text=_noop)
+        self.assertEqual(agent.run("看看目录"), "ok")
         self.assertEqual(len(client.calls), 2)
         second = client.calls[1]
         self.assertTrue(any(m["role"] == "tool" and m["tool_call_id"] == "c1"
@@ -59,18 +59,18 @@ class TestAgent(unittest.TestCase):
 
     def test_finish_reason_length(self) -> None:
         agent = Agent(FakeClient([Completion(content="半截", finish_reason="length")]),
-                      self.tools)
-        self.assertIn("max_tokens", agent.run("写长文", on_text=_noop))
+                      self.tools, on_text=_noop)
+        self.assertIn("max_tokens", agent.run("写长文"))
 
     def test_llm_error_becomes_text(self) -> None:
-        agent = Agent(FakeClient([LLMError("boom")]), self.tools)
-        self.assertIn("模型调用失败", agent.run("hi", on_text=_noop))
+        agent = Agent(FakeClient([LLMError("boom")]), self.tools, on_text=_noop)
+        self.assertIn("模型调用失败", agent.run("hi"))
 
     def test_max_turns(self) -> None:
         responses = [Completion(content="", tool_calls=[ToolCall(f"c{i}", "list_dir", "{}")])
                      for i in range(3)]
-        agent = Agent(FakeClient(responses), self.tools, max_turns=3)
-        self.assertIn("最大轮数", agent.run("死循环", on_text=_noop))
+        agent = Agent(FakeClient(responses), self.tools, on_text=_noop, max_turns=3)
+        self.assertIn("最大轮数", agent.run("死循环"))
 
 
 if __name__ == "__main__":

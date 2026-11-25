@@ -102,6 +102,7 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
     )
     agent = Agent(
         client, tools,
+        on_text=print_stream,
         max_turns=args.max_turns,
         context_tokens=args.context_tokens,
         on_event=Tracer(trace_path),
@@ -110,12 +111,10 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
 
 
 def print_stream(piece: str) -> None:
-    """流式回调：边收边打印，不换行。"""
     print(piece, end="", flush=True)
 
 
 def repl(agent: Agent) -> None:
-    """交互模式：读一行、跑一次，直到 /exit 或 Ctrl-D。"""
     print("交互模式:输入任务,/exit 退出。")
     while True:
         try:
@@ -127,7 +126,7 @@ def repl(agent: Agent) -> None:
             return
         if not task:
             continue
-        agent.run(task, on_text=print_stream)
+        agent.run(task)
         print()              # 流式内容已经打过了，只补一个换行
 
 
@@ -143,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"trace={trace_path}")
 
     if args.task:
-        agent.run(" ".join(args.task), on_text=print_stream)
+        agent.run(" ".join(args.task))
         print()              # 流式内容已经打过了，只补一个换行
         return 0
 
