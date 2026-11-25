@@ -54,8 +54,11 @@ class Agent:
         self.context_tokens = context_tokens
         self.on_event = on_event
 
-    def run(self, task: str) -> str:
-        """执行一个任务，返回最终答复（或失败说明）。"""
+    def run(self, task: str, on_text: Callable[[str], None] | None = None) -> str:
+        """执行一个任务，返回最终答复（或失败说明）。
+
+        ``on_text`` 不为 None 时走流式：文本片段边到边回调。
+        """
         messages: list[dict] = [
             {"role": "system", "content": self.system_prompt.format(workspace=self.tools.workspace)},
             {"role": "user", "content": task},
@@ -63,11 +66,25 @@ class Agent:
         last_text = ""
 
         for turn in range(1, self.max_turns + 1):
-            messages = fit_context(messages, self.context_tokens)
+            before_tokens = count_tokens(messages)
+            fitted = fit_context(messages, self.context_tokens)
+            if len(fitted) != len(messages):
+                self._emit(
+                    "context", turn=turn,
+                    before_tokens=before_tokens,
+                    after_tokens=count_tokens(fitted),
+                    dropped=len(messages) - len(fitted),
+                )
+            messages = fitted
             self._emit("request", turn=turn, messages=messages)
 
             try:
-                comp = self.client.chat(messages, tools=self.tools.schemas())
+                comp = self.client.chat(
+                    messages,
+                    tools=self.tools.schemas(),
+                    stream=on_text is not None,
+                    on_text=on_text,
+                )
             except LLMError as exc:
                 return f"[harness] 模型调用失败:{exc}"
 
@@ -165,12 +182,31 @@ def count_tokens(messages: list[dict]) -> int:
     return total + 2  # 结尾 assistant 前缀的固定开销
 
 
+def _truncate_message(message: dict, limit_tokens: int) -> dict:
+    """把单条超长消息截到 ``limit_tokens`` 以内（返回新 dict）。"""
+    content = message.get("content")
+    if not isinstance(content, str) or not content:
+        return message
+    used = _text_tokens(content)
+    if used <= limit_tokens:
+        return message
+    keep = max(200, int(len(content) * limit_tokens / used))
+    clipped = dict(message)
+    clipped["content"] = content[:keep] + "\n...[单条消息过长,已截断]"
+    return clipped
+
+
 def fit_context(messages: list[dict], budget_tokens: int) -> list[dict]:
     """按 token 预算裁剪上下文。
 
-    保留 system 和第一条 user（任务目标），从最旧的一「轮」开始丢。
-    以 assistant 为界整段丢弃（连同其后的 tool 消息），避免留下孤立的
-    ``tool_call_id`` —— 那会被模型服务拒绝（400）。
+    策略（顺序很重要）：
+    1. 装得下就原样返回 —— 大多数任务在 1M 窗口下根本不会触发裁剪；
+    2. 单条消息超过预算一半时先截断（否则"一条 50KB 的 read_file 结果"
+       会让后面的轮次全丢光也装不下）；
+    3. 仍超预算，就从最旧的一「轮」开始整段丢（assistant + 其后的 tool），
+       绝不留孤立的 ``tool_call_id`` —— 那会被模型服务拒绝（400）。
+
+    始终保留 system 和第一条 user（任务目标）。
     """
     if count_tokens(messages) <= budget_tokens or len(messages) <= 3:
         return messages
@@ -180,13 +216,20 @@ def fit_context(messages: list[dict], budget_tokens: int) -> list[dict]:
     body = rest[1:] if task else rest
     kept = [head] + ([task] if task else [])
 
-    while body and count_tokens(kept + body) > budget_tokens:
-        if body[0].get("role") == "assistant":
-            i = 1
-            while i < len(body) and body[i].get("role") == "tool":
-                i += 1
-            body = body[i:]
-        else:
-            body = body[1:]
+    # 2) 单条封顶：预算的一半
+    per_message_cap = max(256, budget_tokens // 2)
+    body = [_truncate_message(m, per_message_cap) for m in body]
 
-    return kept + body
+    # 3) 按轮丢：先算好每条大小，丢弃时做减法，避免反复编码
+    sizes = [count_tokens([m]) for m in body]
+    total = count_tokens(kept) + sum(sizes)
+    i = 0
+    while i < len(body) and total > budget_tokens:
+        j = i + 1
+        if body[i].get("role") == "assistant":
+            while j < len(body) and body[j].get("role") == "tool":
+                j += 1
+        total -= sum(sizes[i:j])
+        i = j
+
+    return kept + body[i:]

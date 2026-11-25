@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from llm import ChatClient
@@ -70,3 +71,38 @@ class TestParse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStream(unittest.TestCase):
+    @staticmethod
+    def _sse(obj: dict) -> str:
+        return "data: " + json.dumps(obj, ensure_ascii=False)
+
+    def test_content_and_tool_calls_are_assembled(self) -> None:
+        lines = [
+            self._sse({"choices": [{"delta": {"content": "你"}}]}),
+            self._sse({"choices": [{"delta": {"content": "好"}}]}),
+            self._sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "c1",
+                "function": {"name": "read_file", "arguments": '{"path":'}}]}}]}),
+            self._sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "function": {"arguments": ' "a"}'}}]}}]}),
+            self._sse({"choices": [{"finish_reason": "tool_calls"}]}),
+            self._sse({"usage": {"total_tokens": 7}}),
+            "data: [DONE]",
+        ]
+        got: list[str] = []
+        comp = ChatClient._consume_stream(lines, got.append)
+
+        self.assertEqual(comp.content, "你好")
+        self.assertEqual(got, ["你", "好"])
+        self.assertEqual(comp.tool_calls[0].name, "read_file")
+        self.assertEqual(comp.tool_calls[0].arguments, '{"path": "a"}')
+        self.assertEqual(comp.finish_reason, "tool_calls")
+        self.assertEqual(comp.usage["total_tokens"], 7)
+
+    def test_ignores_keepalive_and_bad_json(self) -> None:
+        lines = ["", ": keep-alive", "data: {not json", "data: [DONE]"]
+        comp = ChatClient._consume_stream(lines)
+        self.assertEqual(comp.content, "")
+        self.assertEqual(comp.tool_calls, [])

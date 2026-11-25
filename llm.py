@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from typing import Callable
 
 __all__ = ["ChatClient", "Completion", "LLMError", "ToolCall"]
 
@@ -98,8 +99,14 @@ class ChatClient:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stream: bool = False,
+        on_text: Callable[[str], None] | None = None,
     ) -> Completion:
-        """发一次请求，返回归一化后的 Completion。"""
+        """发一次请求，返回归一化后的 Completion。
+
+        ``stream=True`` 时走 SSE：文本片段边到边回调 ``on_text``，
+        工具调用分片会在内部拼好后再返回。
+        """
         payload: dict = {
             "model": self.model,
             "messages": messages,
@@ -115,20 +122,122 @@ class ChatClient:
         if self.is_deepseek:
             payload["thinking"] = {"type": "disabled"}
 
+        if stream:
+            payload["stream"] = True
+            # 让服务端在最后一块里带 usage，否则流式拿不到 token 数
+            payload["stream_options"] = {"include_usage": True}
+            return self._post_with_retry(payload, stream=True, on_text=on_text)
+
         return self._parse(self._post_with_retry(payload))
 
     # ---- 传输 ----
 
-    def _post_with_retry(self, payload: dict) -> dict:
+    def _post_with_retry(self, payload: dict, *, stream: bool = False,
+                         on_text: Callable[[str], None] | None = None):
+        """发请求。网络类错误重试；流式时若已经输出过内容则不再重试。"""
         last: Exception | None = None
+        emitted = False
+
+        def emit(piece: str) -> None:
+            nonlocal emitted
+            emitted = True
+            if on_text:
+                on_text(piece)
+
         for attempt in range(self.retries + 1):
             try:
+                if stream:
+                    return self._post_stream(payload, emit)
                 return self._post(payload)
             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                if emitted:
+                    # 已经开始往终端吐字，再重试会重复输出
+                    raise LLMError(f"流式中断: {exc}") from exc
                 last = exc
                 if attempt < self.retries:
                     time.sleep(1.5 * (attempt + 1))  # 线性退避
         raise LLMError(f"无法连接模型服务 {self.url}: {last}")
+
+    def _post_stream(self, payload: dict,
+                     on_text: Callable[[str], None]) -> Completion:
+        """POST 并解析 SSE；服务端忽略 stream 时自动退回普通 JSON。"""
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(self.url, data=body, headers=headers)
+
+        try:
+            resp = urllib.request.urlopen(req, timeout=self.timeout)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:800]
+            raise LLMError(f"HTTP {exc.code}: {detail}") from exc
+
+        with resp:
+            ctype = resp.headers.get("Content-Type", "")
+            if "application/json" in ctype:
+                return self._parse(json.loads(resp.read()))
+            return self._consume_stream(resp, on_text)
+
+    @staticmethod
+    def _consume_stream(lines,
+                        on_text: Callable[[str], None] | None = None) -> Completion:
+        """把 SSE 的 ``data:`` 行拼成 Completion。
+
+        ``lines`` 可以是 bytes / str 的可迭代对象（单测直接喂列表即可）。
+        工具调用是按 index 分片到达的，这里累计 id / name / arguments。
+        """
+        content_parts: list[str] = []
+        calls: dict[int, dict] = {}
+        finish_reason = ""
+        usage: dict = {}
+
+        for raw in lines:
+            line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            line = line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    content_parts.append(piece)
+                    if on_text:
+                        on_text(piece)
+                for tc in delta.get("tool_calls") or []:
+                    idx = int(tc.get("index", 0))
+                    slot = calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["arguments"] += fn["arguments"]
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+
+        ordered = [
+            ToolCall(id=calls[i]["id"] or f"call_{i}",
+                     name=calls[i]["name"],
+                     arguments=calls[i]["arguments"] or "{}")
+            for i in sorted(calls)
+        ]
+        return Completion(
+            content="".join(content_parts).strip(),
+            tool_calls=ordered,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
 
     def _post(self, payload: dict) -> dict:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

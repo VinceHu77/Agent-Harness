@@ -47,6 +47,20 @@ class TestFitContext(unittest.TestCase):
         out = fit_context(_long_conversation(), 400)
         self.assertTrue(count_tokens(out) <= 400 or len(out) <= 3)
 
+    def test_oversized_single_message_is_truncated(self) -> None:
+        """一条 5000 字符的 tool 结果，不该把整轮都挤掉。"""
+        msgs = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "x" * 5000},
+        ]
+        out = fit_context(msgs, 600)
+        self.assertTrue(any("已截断" in (m.get("content") or "") for m in out))
+        self.assertTrue(count_tokens(out) <= 600)
+
 
 if __name__ == "__main__":
     unittest.main()

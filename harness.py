@@ -49,6 +49,8 @@ class Tracer:
         if kind == "request":
             print(f"\n── 第 {event['turn']} 轮 ──")
         elif kind == "response":
+            if event["tool_calls"] and event.get("content"):
+                print()  # 流式文本刚打完，换行再打工具调用
             for call in event["tool_calls"]:
                 print(f"  → {call['name']}({one_line(call['arguments'], 160)})")
         elif kind == "tool":
@@ -76,6 +78,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-shell", action="store_true", help="禁用 run_bash")
     p.add_argument("--allow-dangerous", action="store_true", help="允许危险命令(慎用)")
     p.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR, help="JSONL 轨迹目录")
+    p.add_argument("--no-stream", action="store_true", help="关闭流式输出(默认开启)")
     return p.parse_args(argv)
 
 
@@ -107,7 +110,8 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
     return agent, trace_path
 
 
-def repl(agent: Agent) -> None:
+def repl(agent: Agent, on_text=None) -> None:
+    """交互模式：读一行、跑一次，直到 /exit 或 Ctrl-D。"""
     print("交互模式:输入任务,/exit 退出。")
     while True:
         try:
@@ -117,8 +121,13 @@ def repl(agent: Agent) -> None:
             return
         if task in ("/exit", "exit", "quit"):
             return
-        if task:
-            print(agent.run(task))
+        if not task:
+            continue
+        answer = agent.run(task, on_text=on_text)
+        if on_text:
+            print()          # 流式内容已经打过了，只补一个换行
+        else:
+            print(answer)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -132,11 +141,17 @@ def main(argv: list[str] | None = None) -> int:
     if trace_path:
         print(f"trace={trace_path}")
 
+    on_text = None if args.no_stream else (lambda piece: print(piece, end="", flush=True))
+
     if args.task:
-        print(agent.run(" ".join(args.task)))
+        answer = agent.run(" ".join(args.task), on_text=on_text)
+        if on_text:
+            print()
+        else:
+            print(answer)
         return 0
 
-    repl(agent)
+    repl(agent, on_text=on_text)
     return 0
 
 

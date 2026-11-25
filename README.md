@@ -96,6 +96,7 @@ python3 harness.py --no-shell --workspace ~/projects/demo
 | `--no-shell` | 关 | 禁用 `run_bash` |
 | `--allow-dangerous` | 关 | 放行危险命令正则（慎用） |
 | `--trace-dir` | `runs` | JSONL 轨迹目录 |
+| `--no-stream` | 关 | 关闭流式输出（默认开启 SSE，首字延迟从数秒降到 <1s） |
 
 ## DeepSeek 配置建议
 
@@ -141,11 +142,12 @@ python3 harness.py --no-shell --workspace ~/projects/demo
 
 1. **错误也是上下文。** 工具抛异常、参数 JSON 坏了、路径越界、未知工具，一律转成
    `[error] ...` 字符串回填给模型。模型看到错误才能自纠；静默失败则循环卡死。
-2. **上下文预算按 token 算。** `count_tokens()` 按「每条消息 +4、末尾 +2」的
-   官方口径统计。默认用「2 字符 ≈ 1 token」估算，**不联网、启动零延迟**；
-   需要精确值时开 `MINI_HARNESS_TOKENIZER=on` 并装 tiktoken（编码器首次调用才加载）。
-   超预算时从最旧的**整轮**（assistant + 其后的 tool 消息）开始丢，
-   绝不留孤立的 `tool_call_id`，并始终保留 system 和第一条任务描述。
+2. **上下文预算按 token 算，分三步裁剪。** `count_tokens()` 按「每条消息 +4、
+   末尾 +2」的官方口径统计（默认字符估算，开 `MINI_HARNESS_TOKENIZER=on` 用 tiktoken）。
+   装得下就原样返回；装不下先把**单条超过预算一半**的消息截断（否则一条 50KB 的
+   `read_file` 结果会让后面全丢光也装不下）；仍超预算才从最旧的**整轮**
+   （assistant + 其后的 tool 消息）开始丢，绝不留孤立的 `tool_call_id`，
+   并始终保留 system 和第一条任务描述。被裁剪时会发一条 `context` trace 事件。
 3. **停止条件。** 模型不再调工具 / 达到 `--max-turns` / 模型服务异常（`LLMError`）。
    没有它们，弱模型会无限调用工具。另外 `finish_reason == "length"` 时会在答复后
    追加一句「可能被截断」的提示。
@@ -153,6 +155,9 @@ python3 harness.py --no-shell --workspace ~/projects/demo
 5. **权限在工具层，不在 prompt 里。** 路径 `resolve()` 后必须落在 workspace 内；
    危险命令正则拦截；`--ask` 人工确认；shell 超时上限 120s。
 6. **可观测。** 每次请求/响应/工具调用写入 `runs/run-*.jsonl`，出问题可回放。
+7. **流式输出（SSE）。** `llm.chat(stream=True, on_text=...)` 边收边打印；
+   工具调用按 `index` 分片累积后还原成完整的 `ToolCall`。若服务端忽略 `stream`
+   返回普通 JSON，会自动退回非流式解析。流式中途断开不重试（避免重复输出）。
 
 ## 测试
 
@@ -210,7 +215,7 @@ python3 -m unittest discover -s tests -t . -v
 - **不是沙箱。** `run_bash` 的拦截只是**安全带**，能拦明显手滑（`rm -rf /`、`mkfs`、
   `dd of=/dev/*`、关机、fork bomb），拦不住有意绕过。不要在无隔离环境里用
   `--allow-dangerous` 跑不可信任务。
-- 没有流式输出（SSE）、没有跨任务记忆、没有子 agent / MCP / 审批 UI / 评测集。
+- 没有跨任务记忆、没有子 agent / MCP / 审批 UI / 评测集。
 - token 计数默认是**字符估算**（2 字符 ≈ 1 token），不是目标模型的真实分词；
   需要精确值时开 `MINI_HARNESS_TOKENIZER=on`（并 `pip install tiktoken`）。
   这么做是为了避免 tiktoken 首次加载词表时联网卡住启动（实测可超过 60 秒）。
@@ -220,7 +225,6 @@ python3 -m unittest discover -s tests -t . -v
 
 | 方向 | 落点 |
 | --- | --- |
-| 流式输出 | `llm.py` 增加 `stream=True`，逐块拼接 `tool_calls` delta |
 | 上下文压缩 | `loop.py` 的 `fit_context`：超预算时先让模型摘要旧轮次 |
 | 精确分词 | `_size()` 换成目标模型的 tokenizer（llama-server 可查 `/tokenize`） |
 | 更多工具 | `tools.py` 的 `add()`；MCP server 可适配成一批 `Tool` |
