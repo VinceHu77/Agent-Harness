@@ -14,6 +14,7 @@
 | `harness.py` | 入口层 | CLI / REPL、参数解析、终端打印 + JSONL 轨迹日志 |
 | `loop.py` | 循环层 | Agent 状态机：拼上下文、调模型、执行工具、回填结果、停止条件；`fit_context()` 按 token 预算裁剪 |
 | `tools.py` | 工具层 | 工具注册表 + 4 个内置工具；路径围栏、超时、危险命令拦截、输出截断 |
+| `world.py` | 世界层 | 客服世界（SQLite）：客户 / 订单 / 优惠券 / 工单；建表、种子数据、只读查询 |
 | `llm.py` | 模型层 | OpenAI 兼容客户端；重试、响应归一化成 `Completion` / `ToolCall` |
 | `tests/` | 测试 | 31 个 unittest 用例，离线可跑（不需要模型服务） |
 | `playground/` | 示例 | 供 agent 练手的小脚本（`buggy.py`） |
@@ -63,6 +64,9 @@ pip install -r requirements.txt      # 可跳过，不装则用字符估算 toke
 export DEEPSEEK_API_KEY=sk-...
 python3 harness.py "统计当前目录有多少个 .py 文件,并说明各自作用" --workspace playground
 
+# 初始化客服世界（生成 world.db：3 个客户、5 个订单、2 张券）
+python3 harness.py --reset-world
+
 # 交互模式
 python3 harness.py --workspace playground
 
@@ -96,6 +100,29 @@ python3 harness.py --no-shell --workspace ~/projects/demo
 | `--no-shell` | 关 | 禁用 `run_bash` |
 | `--allow-dangerous` | 关 | 放行危险命令正则（慎用） |
 | `--trace-dir` | `runs` | JSONL 轨迹目录 |
+
+## 客服世界（`world.py`）
+
+`world.db` 是一个 SQLite 文件（已 gitignore），四张表：
+
+| 表 | 关键字段 |
+| --- | --- |
+| `customers` | `id / name / tier / points / status / tenant_id` |
+| `orders` | `id / customer_id / status / paid_cents / refunded_cents / items_json` |
+| `coupons` | `code / customer_id / status / value_cents / expires_at` |
+| `tickets` | `id / customer_id / subject / status / created_at` |
+
+种子数据故意留了几种边界：正常订单、部分退款订单（`ORD-1004` 已退 5000）、
+已关闭订单（`ORD-1005`）、已注销客户（`CUST-03`）——后面的门控规则直接拿它们做用例。
+
+```bash
+python3 harness.py --reset-world          # 清空重建 + 写入种子
+```
+
+```python
+import world
+world.query("SELECT * FROM orders WHERE id = ?", ("ORD-1001",))
+```
 
 ## DeepSeek 配置建议
 

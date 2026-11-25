@@ -11,3 +11,7 @@ venv/
 build/
 dist/
 
+
+# 客服世界（生成物）
+world.db
+world.db-journal

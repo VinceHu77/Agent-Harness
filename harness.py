@@ -20,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 
+import world
 from llm import API_KEY_ENV, ChatClient
 from loop import Agent
 from tools import ToolRegistry
@@ -78,6 +79,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-shell", action="store_true", help="禁用 run_bash")
     p.add_argument("--allow-dangerous", action="store_true", help="允许危险命令(慎用)")
     p.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR, help="JSONL 轨迹目录")
+    p.add_argument("--reset-world", action="store_true", help="重建客服世界(world.db)并写入种子数据")
     return p.parse_args(argv)
 
 
@@ -132,6 +134,11 @@ def repl(agent: Agent) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.reset_world:
+        world.reset()
+        print(f"world reset: {world.DEFAULT_DB}")
+
     agent, trace_path = build_agent(args)
 
     if "deepseek.com" in args.base_url and not os.environ.get(API_KEY_ENV):
