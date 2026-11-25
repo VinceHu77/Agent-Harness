@@ -54,10 +54,10 @@ class Agent:
         self.context_tokens = context_tokens
         self.on_event = on_event
 
-    def run(self, task: str, on_text: Callable[[str], None] | None = None) -> str:
+    def run(self, task: str, on_text: Callable[[str], None]) -> str:
         """执行一个任务，返回最终答复（或失败说明）。
 
-        ``on_text`` 不为 None 时走流式：文本片段边到边回调。
+        始终走流式：模型生成的文本片段会实时回调给 ``on_text``。
         """
         messages: list[dict] = [
             {"role": "system", "content": self.system_prompt.format(workspace=self.tools.workspace)},
@@ -82,7 +82,7 @@ class Agent:
                 comp = self.client.chat(
                     messages,
                     tools=self.tools.schemas(),
-                    stream=on_text is not None,
+                    stream=True,
                     on_text=on_text,
                 )
             except LLMError as exc:

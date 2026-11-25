@@ -96,7 +96,6 @@ python3 harness.py --no-shell --workspace ~/projects/demo
 | `--no-shell` | 关 | 禁用 `run_bash` |
 | `--allow-dangerous` | 关 | 放行危险命令正则（慎用） |
 | `--trace-dir` | `runs` | JSONL 轨迹目录 |
-| `--no-stream` | 关 | 关闭流式输出（默认开启 SSE，首字延迟从数秒降到 <1s） |
 
 ## DeepSeek 配置建议
 
@@ -155,7 +154,7 @@ python3 harness.py --no-shell --workspace ~/projects/demo
 5. **权限在工具层，不在 prompt 里。** 路径 `resolve()` 后必须落在 workspace 内；
    危险命令正则拦截；`--ask` 人工确认；shell 超时上限 120s。
 6. **可观测。** 每次请求/响应/工具调用写入 `runs/run-*.jsonl`，出问题可回放。
-7. **流式输出（SSE）。** `llm.chat(stream=True, on_text=...)` 边收边打印；
+7. **流式输出（SSE，始终开启）。** `llm.chat(stream=True, on_text=...)` 边收边打印；
    工具调用按 `index` 分片累积后还原成完整的 `ToolCall`。若服务端忽略 `stream`
    返回普通 JSON，会自动退回非流式解析。流式中途断开不重试（避免重复输出）。
 

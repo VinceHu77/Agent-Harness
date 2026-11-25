@@ -11,6 +11,10 @@ from loop import Agent
 from tools import ToolRegistry
 
 
+def _noop(_piece: str) -> None:
+    """流式回调的占位：测试不关心输出。"""
+
+
 class FakeClient:
     """按预设顺序返回响应，并记录每次收到的 messages。"""
 
@@ -38,7 +42,7 @@ class TestAgent(unittest.TestCase):
         events: list[dict] = []
         agent = Agent(FakeClient([Completion(content="done")]), self.tools,
                       on_event=events.append)
-        self.assertEqual(agent.run("hi"), "done")
+        self.assertEqual(agent.run("hi", on_text=_noop), "done")
         self.assertEqual([e["kind"] for e in events], ["request", "response"])
 
     def test_tool_call_roundtrip(self) -> None:
@@ -47,7 +51,7 @@ class TestAgent(unittest.TestCase):
             Completion(content="ok"),
         ])
         agent = Agent(client, self.tools)
-        self.assertEqual(agent.run("看看目录"), "ok")
+        self.assertEqual(agent.run("看看目录", on_text=_noop), "ok")
         self.assertEqual(len(client.calls), 2)
         second = client.calls[1]
         self.assertTrue(any(m["role"] == "tool" and m["tool_call_id"] == "c1"
@@ -56,17 +60,17 @@ class TestAgent(unittest.TestCase):
     def test_finish_reason_length(self) -> None:
         agent = Agent(FakeClient([Completion(content="半截", finish_reason="length")]),
                       self.tools)
-        self.assertIn("max_tokens", agent.run("写长文"))
+        self.assertIn("max_tokens", agent.run("写长文", on_text=_noop))
 
     def test_llm_error_becomes_text(self) -> None:
         agent = Agent(FakeClient([LLMError("boom")]), self.tools)
-        self.assertIn("模型调用失败", agent.run("hi"))
+        self.assertIn("模型调用失败", agent.run("hi", on_text=_noop))
 
     def test_max_turns(self) -> None:
         responses = [Completion(content="", tool_calls=[ToolCall(f"c{i}", "list_dir", "{}")])
                      for i in range(3)]
         agent = Agent(FakeClient(responses), self.tools, max_turns=3)
-        self.assertIn("最大轮数", agent.run("死循环"))
+        self.assertIn("最大轮数", agent.run("死循环", on_text=_noop))
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ class FakeAgent:
     def __init__(self) -> None:
         self.seen: list = []
 
-    def run(self, task: str, on_text=None) -> str:
+    def run(self, task: str, on_text) -> str:
         self.seen.append((task, on_text))
         return "ok"
 
@@ -24,20 +24,19 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.context_tokens, 64_000)
         self.assertEqual(args.temperature, 0.0)
         self.assertEqual(args.max_tokens, 8192)
-        self.assertFalse(args.no_stream)
-
-    def test_no_stream_flag(self) -> None:
-        self.assertTrue(harness.parse_args(["--no-stream"]).no_stream)
 
 
 class TestRepl(unittest.TestCase):
-    def test_accepts_on_text_and_forwards_it(self) -> None:
+    def test_repl_streams_with_internal_callback(self) -> None:
         agent = FakeAgent()
-        callback = lambda piece: None  # noqa: E731
         with mock.patch("builtins.input", side_effect=["你好", "/exit"]), \
                 mock.patch("builtins.print"):
-            harness.repl(agent, on_text=callback)
-        self.assertEqual(agent.seen, [("你好", callback)])
+            harness.repl(agent)
+
+        self.assertEqual(len(agent.seen), 1)
+        task, on_text = agent.seen[0]
+        self.assertEqual(task, "你好")
+        self.assertTrue(callable(on_text))
 
 
 if __name__ == "__main__":
