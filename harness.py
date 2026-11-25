@@ -28,8 +28,10 @@ __version__ = "0.2.0"
 
 DEFAULT_BASE_URL = os.environ.get("LLAMA_BASE_URL", "https://api.deepseek.com")
 DEFAULT_MODEL = os.environ.get("LLAMA_MODEL", "deepseek-flash")
-DEFAULT_MAX_TURNS = 50
-DEFAULT_CONTEXT_TOKENS = 50_000
+DEFAULT_MAX_TURNS = 20          # 每轮都重发上下文，轮数越多越贵
+DEFAULT_CONTEXT_TOKENS = 64_000  # deepseek-flash 窗口 1M；这里按常见任务给足余量
+DEFAULT_TEMPERATURE = 0.0        # 工具调用要可复现
+DEFAULT_MAX_TOKENS = 8192        # 单轮输出上限（模型上限 384K，够用即可）
 DEFAULT_TRACE_DIR = Path("runs")
 
 
@@ -74,6 +76,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--workspace", default=".", help="工具可访问的根目录,默认当前目录")
     p.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="最多几轮工具调用")
     p.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS, help="上下文裁剪预算(token)")
+    p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
+                   help="采样温度,默认 0(工具调用更稳定)")
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                   help="单轮输出上限,默认 8192")
     p.add_argument("--ask", action="store_true", help="每次执行 shell 前人工确认")
     p.add_argument("--no-shell", action="store_true", help="禁用 run_bash")
     p.add_argument("--allow-dangerous", action="store_true", help="允许危险命令(慎用)")
@@ -94,7 +100,11 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
     except OSError:
         trace_path = None
 
-    client = ChatClient(args.base_url, args.model)
+    client = ChatClient(
+        args.base_url, args.model,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+    )
     tools = ToolRegistry(
         workspace,
         allow_shell=not args.no_shell,

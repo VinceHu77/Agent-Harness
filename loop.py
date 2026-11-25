@@ -34,6 +34,89 @@ SYSTEM_PROMPT = """你是运行在用户本地机器上的编码 agent,通过工
 """
 
 
+class Agent:
+    """一次对话的完整状态：历史、预算、轮数上限、事件回调。"""
+
+    def __init__(
+        self,
+        client: ChatClient,
+        tools: ToolRegistry,
+        *,
+        system_prompt: str = SYSTEM_PROMPT,
+        max_turns: int = 20,
+        context_tokens: int = 7000,
+        on_event: Callable[[dict], None] | None = None,
+    ) -> None:
+        self.client = client
+        self.tools = tools
+        self.system_prompt = system_prompt
+        self.max_turns = max_turns
+        self.context_tokens = context_tokens
+        self.on_event = on_event
+
+    def run(self, task: str) -> str:
+        """执行一个任务，返回最终答复（或失败说明）。"""
+        messages: list[dict] = [
+            {"role": "system", "content": self.system_prompt.format(workspace=self.tools.workspace)},
+            {"role": "user", "content": task},
+        ]
+        last_text = ""
+
+        for turn in range(1, self.max_turns + 1):
+            messages = fit_context(messages, self.context_tokens)
+            self._emit("request", turn=turn, messages=messages)
+
+            try:
+                comp = self.client.chat(messages, tools=self.tools.schemas())
+            except LLMError as exc:
+                return f"[harness] 模型调用失败:{exc}"
+
+            self._emit(
+                "response", turn=turn, content=comp.content, usage=comp.usage,
+                tool_calls=[
+                    {"id": c.id, "name": c.name, "arguments": c.arguments}
+                    for c in comp.tool_calls
+                ],
+            )
+            last_text = comp.content
+
+            assistant: dict = {"role": "assistant", "content": comp.content}
+            if comp.tool_calls:
+                assistant["tool_calls"] = [
+                    {
+                        "id": c.id,
+                        "type": "function",
+                        "function": {"name": c.name, "arguments": c.arguments},
+                    }
+                    for c in comp.tool_calls
+                ]
+            messages.append(assistant)
+
+            if not comp.tool_calls:
+                if comp.finish_reason == "length":
+                    return (
+                        comp.content
+                        + "\n[harness] 输出达到 max_tokens 上限,可能被截断。"
+                    ).strip()
+                return comp.content or "(模型没有返回内容)"
+
+            for call in comp.tool_calls:
+                result = self.tools.call(call.name, call.arguments)
+                self._emit(
+                    "tool", turn=turn, name=call.name,
+                    arguments=call.arguments, result=result,
+                )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": result}
+                )
+
+        return f"[harness] 达到最大轮数 {self.max_turns},任务未完成。最后输出:\n{last_text}"
+
+    def _emit(self, kind: str, **data) -> None:
+        if self.on_event:
+            self.on_event({"kind": kind, **data})
+
+
 # ---------------------------------------------------------------------------
 # token 计数：tiktoken 有就用，没有就退化成字符估算
 # ---------------------------------------------------------------------------
@@ -107,87 +190,3 @@ def fit_context(messages: list[dict], budget_tokens: int) -> list[dict]:
             body = body[1:]
 
     return kept + body
-
-
-class Agent:
-    """一次对话的完整状态：历史、预算、轮数上限、事件回调。"""
-
-    def __init__(
-        self,
-        client: ChatClient,
-        tools: ToolRegistry,
-        *,
-        system_prompt: str = SYSTEM_PROMPT,
-        max_turns: int = 20,
-        context_tokens: int = 7000,
-        on_event: Callable[[dict], None] | None = None,
-    ) -> None:
-        self.client = client
-        self.tools = tools
-        self.system_prompt = system_prompt
-        self.max_turns = max_turns
-        self.context_tokens = context_tokens
-        self.on_event = on_event
-
-    def run(self, task: str) -> str:
-        """执行一个任务，返回最终答复（或失败说明）。"""
-        messages: list[dict] = [
-            {"role": "system",
-             "content": self.system_prompt.format(workspace=self.tools.workspace)},
-            {"role": "user", "content": task},
-        ]
-        last_text = ""
-
-        for turn in range(1, self.max_turns + 1):
-            messages = fit_context(messages, self.context_tokens)
-            self._emit("request", turn=turn, messages=messages)
-
-            try:
-                comp = self.client.chat(messages, tools=self.tools.schemas())
-            except LLMError as exc:
-                return f"[harness] 模型调用失败:{exc}"
-
-            self._emit(
-                "response", turn=turn, content=comp.content, usage=comp.usage,
-                tool_calls=[
-                    {"id": c.id, "name": c.name, "arguments": c.arguments}
-                    for c in comp.tool_calls
-                ],
-            )
-            last_text = comp.content
-
-            assistant: dict = {"role": "assistant", "content": comp.content}
-            if comp.tool_calls:
-                assistant["tool_calls"] = [
-                    {
-                        "id": c.id,
-                        "type": "function",
-                        "function": {"name": c.name, "arguments": c.arguments},
-                    }
-                    for c in comp.tool_calls
-                ]
-            messages.append(assistant)
-
-            if not comp.tool_calls:
-                if comp.finish_reason == "length":
-                    return (
-                        comp.content
-                        + "\n[harness] 输出达到 max_tokens 上限,可能被截断。"
-                    ).strip()
-                return comp.content or "(模型没有返回内容)"
-
-            for call in comp.tool_calls:
-                result = self.tools.call(call.name, call.arguments)
-                self._emit(
-                    "tool", turn=turn, name=call.name,
-                    arguments=call.arguments, result=result,
-                )
-                messages.append(
-                    {"role": "tool", "tool_call_id": call.id, "content": result}
-                )
-
-        return f"[harness] 达到最大轮数 {self.max_turns},任务未完成。最后输出:\n{last_text}"
-
-    def _emit(self, kind: str, **data) -> None:
-        if self.on_event:
-            self.on_event({"kind": kind, **data})

@@ -88,12 +88,45 @@ python3 harness.py --no-shell --workspace ~/projects/demo
 | `--base-url` | `$LLAMA_BASE_URL` 或 `https://api.deepseek.com` | API 根地址，自动拼 `/chat/completions` |
 | `--model` | `$LLAMA_MODEL` 或 `deepseek-flash` | 模型名 |
 | `--workspace` | `.` | 工具可访问的根目录，必须存在 |
-| `--max-turns` | `50` | 最多几轮工具调用 |
-| `--context-tokens` | `50000` | 上下文裁剪预算（token，tiktoken 估算） |
+| `--max-turns` | `20` | 最多几轮工具调用（每轮都重发上下文，轮数越多越贵） |
+| `--context-tokens` | `64000` | 上下文裁剪预算（token） |
+| `--temperature` | `0.0` | 采样温度；工具调用建议 0，写作可调高 |
+| `--max-tokens` | `8192` | 单轮输出上限（deepseek-flash 最大 384K） |
 | `--ask` | 关 | 每次执行 shell 前人工确认 |
 | `--no-shell` | 关 | 禁用 `run_bash` |
 | `--allow-dangerous` | 关 | 放行危险命令正则（慎用） |
 | `--trace-dir` | `runs` | JSONL 轨迹目录 |
+
+## DeepSeek 配置建议
+
+当前代码针对 `deepseek-flash`（1M 上下文 / 384K 最大输出）做了三件事：
+
+1. **关闭 thinking 模式。** DeepSeek 默认开启 thinking（effort=high），而带 `tools`
+   时官方要求把每轮的 `reasoning_content` 原样回传，否则返回 400。本 harness 不保存
+   它，所以在请求里显式加了 `"thinking": {"type": "disabled"}`（只对 deepseek.com 生效）。
+2. **默认 `temperature=0`。** 工具调用要可复现；thinking 模式下该参数本就会被忽略。
+3. **默认 `--max-turns 20`、`--context-tokens 64000`。** 每轮都会重发上下文，
+   轮数和上下文大小直接决定成本。
+
+| 场景 | 建议参数 |
+| --- | --- |
+| 日常工具调用 | `--max-turns 20 --context-tokens 64000 --max-tokens 4096` |
+| 长文/整仓库分析 | `--max-turns 30 --context-tokens 256000 --max-tokens 16384` |
+| 省钱/快速验证 | `--max-turns 10 --context-tokens 32000 --max-tokens 2048` |
+
+> 计费参考（off-peak）：输入缓存命中 $0.003/1M、未命中 $0.15/1M、输出 $0.6/1M。
+> 只要前面几轮的消息不变，后续请求会命中前缀缓存，成本远低于按未命中估算。
+
+## 环境变量
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | 调用 deepseek.com 时的 Key | 空（请求会 401） |
+| `LLAMA_BASE_URL` / `LLAMA_MODEL` | 覆盖默认端点/模型 | deepseek |
+| `MINI_HARNESS_TOKENIZER` | 设为 `on` 时用 tiktoken 精确计数；否则按 2 字符≈1 token 估算 | `off` |
+
+`MINI_HARNESS_TOKENIZER` 只影响**上下文裁剪的估算**，不影响模型计费。
+开启后首次会加载 tiktoken 词表（几秒，可能联网），之后走本地缓存。
 
 ## 内置工具
 

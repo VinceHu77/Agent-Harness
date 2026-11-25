@@ -25,7 +25,7 @@ API_KEY_ENV = "DEEPSEEK_API_KEY"
 
 DEFAULT_TIMEOUT = 300.0
 DEFAULT_RETRIES = 2
-DEFAULT_TEMPERATURE = 0.3
+DEFAULT_TEMPERATURE = 0.0
 DEFAULT_MAX_TOKENS = 8192
 
 
@@ -77,11 +77,17 @@ class ChatClient:
         timeout: float = DEFAULT_TIMEOUT,
         retries: int = DEFAULT_RETRIES,
         api_key: str | None = None,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> None:
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.model = model
         self.timeout = timeout
         self.retries = retries
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        # DeepSeek 独有参数（thinking / 专属 key）只在官方端点发送
+        self.is_deepseek = "deepseek.com" in base_url
         # 显式传入时以传入值为准（测试用）；否则按端点决定
         self.api_key = _api_key_for(base_url) if api_key is None else api_key
 
@@ -90,19 +96,24 @@ class ChatClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         *,
-        temperature: float = DEFAULT_TEMPERATURE,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:
         """发一次请求，返回归一化后的 Completion。"""
         payload: dict = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+
+        # DeepSeek 默认开启 thinking（effort=high）。带 tools 时官方要求把每轮的
+        # reasoning_content 原样回传，否则 400；本 harness 不保存它，所以显式关闭。
+        if self.is_deepseek:
+            payload["thinking"] = {"type": "disabled"}
 
         return self._parse(self._post_with_retry(payload))
 
