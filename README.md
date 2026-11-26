@@ -16,7 +16,6 @@
 | `tools.py` | 工具层 | 工具注册表 + 4 个内置工具；路径围栏、超时、危险命令拦截、输出截断 |
 | `world.py` | 世界层 | 客服世界（SQLite）：客户 / 订单 / 优惠券 / 工单；建表、种子数据、只读查询 |
 | `llm.py` | 模型层 | OpenAI 兼容客户端；重试、响应归一化成 `Completion` / `ToolCall` |
-| `tests/` | 测试 | 31 个 unittest 用例，离线可跑（不需要模型服务） |
 | `playground/` | 示例 | 供 agent 练手的小脚本（`buggy.py`） |
 | `runs/` | 产物 | 每次运行的 `run-YYYYmmdd-HHMMSS.jsonl` 轨迹 |
 | `requirements.txt` | 依赖 | 唯一可选依赖 `tiktoken` |
@@ -184,23 +183,6 @@ world.query("SELECT * FROM orders WHERE id = ?", ("ORD-1001",))
 7. **流式输出（SSE，始终开启）。** `llm.chat(stream=True, on_text=...)` 边收边打印；
    工具调用按 `index` 分片累积后还原成完整的 `ToolCall`。若服务端忽略 `stream`
    返回普通 JSON，会自动退回非流式解析。流式中途断开不重试（避免重复输出）。
-
-## 测试
-
-```bash
-python3 -m unittest discover -s tests -t . -v
-```
-
-31 个用例，全部离线（不需要模型服务），约 0.1 秒：
-
-| 文件 | 覆盖点 |
-| --- | --- |
-| `tests/test_policy.py` | 路径围栏（含符号链接逃逸）、危险命令、截断 |
-| `tests/test_tools.py` | 4 个工具 + 未知工具/坏 JSON/越界/参数错/禁用 shell |
-| `tests/test_context.py` | 丢轮次、不留孤立 tool 消息、预算约束 |
-| `tests/test_loop.py` | 直接回答 / 工具往返 / 截断提示 / 模型失败 / 轮数上限 |
-
-测试里显式设了 `MINI_HARNESS_TOKENIZER=off`，不依赖 tiktoken。
 
 ## 轨迹格式（`runs/run-*.jsonl`）
 
