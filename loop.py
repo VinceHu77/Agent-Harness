@@ -15,6 +15,7 @@ import os
 from functools import lru_cache
 from typing import Any, Callable
 
+from gate import decide
 from llm import ChatClient, LLMError
 from tools import ToolRegistry
 
@@ -122,10 +123,16 @@ class Agent:
                 return comp.content or "(模型没有返回内容)"
 
             for call in comp.tool_calls:
-                result = self.tools.call(call.name, call.arguments)
+                decision = decide(call.name, call.arguments)
+                if decision["decision"] == "deny":
+                    result = (f"[error] 已拒绝（{decision['rule']}）："
+                              f"{decision['reason']}")
+                else:
+                    result = self.tools.call(call.name, call.arguments)
                 self._emit(
                     "tool", turn=turn, name=call.name,
                     arguments=call.arguments, result=result,
+                    decision=decision["decision"], rule=decision["rule"],
                 )
                 self.messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}

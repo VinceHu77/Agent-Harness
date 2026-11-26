@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-from functools import partial
 
 import world
 
@@ -92,11 +91,8 @@ def refund_preview(order_id: str, amount_cents: int) -> str:
     return "\n".join(lines)
 
 
-def refund_apply(order_id: str, amount_cents: int, *, allow_refund: bool) -> str:
-    """真正执行退款。默认关闭，只有 ``--allow-refund`` 启动时才允许写库。"""
-    if not allow_refund:
-        return "[error] 退款功能未开启。请用 --allow-refund 启动后再试。"
-
+def refund_apply(order_id: str, amount_cents: int) -> str:
+    """真正执行退款。是否允许由 ``gate.decide()`` 先判定。"""
     rows = world.query("SELECT * FROM orders WHERE id = ?", (order_id,))
     if not rows:
         return f"[error] 订单不存在: {order_id}"
@@ -195,7 +191,7 @@ def register_cs_tools(registry) -> None:
             },
             "required": ["order_id", "amount_cents"],
         },
-        partial(refund_apply, allow_refund=registry.allow_refund),
+        refund_apply,
     ))
 
     registry.add(Tool(

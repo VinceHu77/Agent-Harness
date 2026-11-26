@@ -14,7 +14,8 @@
 | `harness.py` | 入口层 | CLI / REPL、参数解析、终端打印 + JSONL 轨迹日志 |
 | `loop.py` | 循环层 | Agent 状态机：拼上下文、调模型、执行工具、回填结果、停止条件；`fit_context()` 按 token 预算裁剪 |
 | `tools.py` | 工具层 | 工具注册表：schema、执行、错误回填、输出截断 |
-| `cstools.py` | 工具实现 | 客服工具（当前只有只读的 `order_query`） |
+| `cstools.py` | 工具实现 | 客服工具（`order_query` / `ticket_create` / `refund_preview` / `refund_apply`） |
+| `gate.py` | 门控层 | 风险层级表 + 不变量判定：`allow` / `deny`（fail-closed） |
 | `world.py` | 世界层 | 客服世界（SQLite）：客户 / 订单 / 优惠券 / 工单；建表、种子数据、只读查询 |
 | `llm.py` | 模型层 | OpenAI 兼容客户端；重试、响应归一化成 `Completion` / `ToolCall` |
 | `runs/` | 产物 | 每次运行的 `run-YYYYmmdd-HHMMSS.jsonl` 轨迹 |
@@ -93,7 +94,6 @@ python3 harness.py
 | `--max-tokens` | `8192` | 单轮输出上限（deepseek-flash 最大 384K） |
 | `--trace-dir` | `runs` | JSONL 轨迹目录 |
 | `--reset-world` | — | 重建 `world.db` 并写入种子数据 |
-| `--allow-refund` | 关 | 允许 `refund_apply` 真正执行退款 |
 
 ## 客服世界（`world.py`）
 
@@ -156,11 +156,29 @@ world.query("SELECT * FROM orders WHERE id = ?", ("ORD-1001",))
 | `order_query(order_id)` | R0 只读 | 状态、客户、实付/已退/剩余可退、商品；订单不存在返回 `[error]` |
 | `ticket_create(customer_id, subject)` | R1 可逆 | 往 `tickets` 插一行，返回新工单号；客户不存在/空主题返回 `[error]` |
 | `refund_preview(order_id, amount_cents)` | R2 预览 | **不落库**，只返回"退多少、退完剩多少、是否超额" |
-| `refund_apply(order_id, amount_cents)` | R2 执行 | 真正写 `refunded_cents`；**默认关闭**，需 `--allow-refund`；超额直接拒绝 |
+| `refund_apply(order_id, amount_cents)` | R2 执行 | 真正写 `refunded_cents`；执行前先过 `gate.decide()`，超额/已关闭/缺参一律拒绝 |
 
 `refund_preview` 是 R2 动作的保护带：模型先把将要发生的事说清楚，确认后才执行。
-`refund_apply` 默认关闭（`--allow-refund` 才开），超额退款会被直接拒绝——
-这是第 8 步 `gate.py` 出现前最笨但有效的门控。
+真正执行前还要过 `gate.decide()`（见下节），规则不通过就不会写库。
+
+## 门控（`gate.py`）
+
+执行工具前先判定，**不通过就不写库**：
+
+```python
+decision = decide(tool_name, raw_args)   # {"decision": "allow"|"deny", "tier", "rule", "reason"}
+```
+
+| 规则 | 触发条件 |
+| --- | --- |
+| `C-UNKNOWN-TOOL` | 工具不在风险表里（fail-closed） |
+| `C-BAD-ARGS` / `C-BAD-AMOUNT` | 缺订单号、金额非整数或 ≤ 0 |
+| `C-NOT-FOUND` | 订单不存在 |
+| `C-CLOSED` | 客户已注销或订单已关闭 |
+| `C-OVERREFUND` | 本次退款超过剩余可退 |
+
+被拒时模型收到的是 `[error] 已拒绝（C-OVERREFUND）：退款 ¥999.00 超过剩余可退 ¥300.00`，
+它会把原因转述给客户；世界状态不变。trace 的 `tool` 事件里也记了 `decision` 和 `rule`。
 
 ## 关键设计（这些才是 harness 的「完整」所在）
 
@@ -203,8 +221,8 @@ world.query("SELECT * FROM orders WHERE id = ?", ("ORD-1001",))
 - **Key 只从环境变量读。** `llm._api_key_for()` 只在 `base_url` 含 `deepseek.com`
   时附加 `Authorization`（本地 llama-server 不带 key）。历史版本曾把 key 写死在
   代码里：如果那次提交进过 git 历史，请到控制台**轮换**该 key。
-- **还没有门控。** 当前只有只读工具，所以没有风险；等退款/发券这类不可逆工具加进来，
-  会先补 `gate.py`（不变量检查 + dry-run）再开放执行。
+- **门控只覆盖退款。** `gate.py` 目前只对 `refund_apply` 做规则判定；
+  发券、扣积分、关单等工具加入时要补对应的不变量。
 - 没有跨任务记忆、没有子 agent / MCP / 审批 UI / 评测集。
 - token 计数默认是**字符估算**（2 字符 ≈ 1 token），不是目标模型的真实分词；
   需要精确值时开 `MINI_HARNESS_TOKENIZER=on`（并 `pip install tiktoken`）。
