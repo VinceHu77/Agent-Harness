@@ -27,6 +27,9 @@ def order_query(order_id: str) -> str:
         return f"[error] 订单不存在: {order_id}"
 
     order = rows[0]
+    if order["tenant_id"] != world.CURRENT_TENANT:
+        return f"[error] 无权访问该订单（属于其他租户）: {order_id}"
+
     remaining = order["paid_cents"] - order["refunded_cents"]
     items = "、".join(
         f"{item['name']}×{item['qty']}" for item in json.loads(order["items_json"])
@@ -119,6 +122,13 @@ def refund_apply(order_id: str, amount_cents: int) -> str:
         return "[error] 退款失败：订单状态已变化，请重新预览"
 
     after = order["refunded_cents"] + amount
+    world.log_action(
+        "refund_apply",
+        {"order_id": order_id, "amount_cents": amount},
+        "allow",
+        before=dict(order),
+        after={**dict(order), "refunded_cents": after},
+    )
     return (
         f"已退款 ¥{amount / 100:.2f}。订单 {order_id} 累计退款 ¥{after / 100:.2f}，"
         f"剩余可退 ¥{(order['paid_cents'] - after) / 100:.2f}。"

@@ -1,22 +1,26 @@
-"""客服世界：订单、客户、优惠券、工单的 SQLite 存储。
-
-这一步只提供「读」的能力（建表 + 种子数据 + query），
-写操作和事务预览留给后面的步骤。
+"""客服世界：客户、订单、优惠券、工单、审计账本（SQLite）。
 
 设计上的两个考虑：
-- 用 SQLite 而不是 JSON：后面做 dry-run（BEGIN → ROLLBACK）和 fork（复制文件）
-  时不用换存储；
+- 用 SQLite 而不是 JSON：dry-run（BEGIN → ROLLBACK）和 fork（复制文件）
+  不用换存储；
 - 所有函数都接受 ``path``：测试用临时文件，互不污染。
+
+``CURRENT_TENANT`` 是当前客服所属租户；跨租户的订单既读不到也改不了。
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
-__all__ = ["DEFAULT_DB", "connect", "execute", "init_schema", "insert", "reset", "seed", "query"]
+__all__ = ["CURRENT_TENANT", "DEFAULT_DB", "connect", "execute", "init_schema", "insert",
+           "log_action", "reset", "seed", "query"]
 
 DEFAULT_DB = Path("world.db")
+
+# 当前客服只服务 T1 租户
+CURRENT_TENANT = "T1"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (
@@ -53,13 +57,25 @@ CREATE TABLE IF NOT EXISTS tickets (
     status      TEXT NOT NULL DEFAULT 'open',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS ledger (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL DEFAULT (datetime('now')),
+    tool        TEXT NOT NULL,
+    args_json   TEXT NOT NULL,
+    decision    TEXT NOT NULL,
+    rule        TEXT NOT NULL DEFAULT '',
+    before_json TEXT NOT NULL DEFAULT '{}',
+    after_json  TEXT NOT NULL DEFAULT '{}'
+);
 """
 
-# 种子数据：3 个客户、5 个订单、2 张券
+# 种子数据：4 个客户、7 个订单、2 张券（含跨租户与边界数据）
 CUSTOMERS = [
     ("CUST-01", "张伟", "gold",   1200, "active", "T1"),
     ("CUST-02", "李娜", "silver",  300, "active", "T1"),
     ("CUST-03", "王强", "basic",     0, "closed", "T1"),
+    ("CUST-04", "赵敏", "basic",     0, "active", "T2"),   # 另一个租户
 ]
 
 ORDERS = [
@@ -68,6 +84,8 @@ ORDERS = [
     ("ORD-1003", "CUST-02", "delivered",  5900,    0, '[{"name":"鼠标垫","qty":1}]',   "T1"),
     ("ORD-1004", "CUST-02", "delivered", 19900, 5000, '[{"name":"耳机","qty":1}]',     "T1"),
     ("ORD-1005", "CUST-03", "closed",     8800,    0, '[{"name":"数据线","qty":2}]',   "T1"),
+    ("ORD-1006", "CUST-01", "delivered",100000,    0, '[{"name":"显示器","qty":1}]',   "T1"),
+    ("ORD-2001", "CUST-04", "delivered", 50000,    0, '[{"name":"摄像头","qty":1}]',   "T2"),
 ]
 
 COUPONS = [
@@ -112,13 +130,32 @@ def reset(path: Path = DEFAULT_DB) -> None:
     """清空并重建 —— 命令行 ``--reset-world`` 用这个。"""
     conn = connect(path)
     try:
-        for table in ("tickets", "coupons", "orders", "customers"):
+        for table in ("ledger", "tickets", "coupons", "orders", "customers"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
         conn.commit()
     finally:
         conn.close()
     init_schema(path)
     seed(path)
+
+
+def log_action(tool: str, args: dict, decision: str, *,
+               rule: str = "", before: dict | None = None,
+               after: dict | None = None, path: Path = DEFAULT_DB) -> int:
+    """往 ledger 追加一条审计记录（不可逆动作的 before/after）。"""
+    return insert(
+        "INSERT INTO ledger (tool, args_json, decision, rule, before_json, after_json) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            tool,
+            json.dumps(args, ensure_ascii=False),
+            decision,
+            rule,
+            json.dumps(before or {}, ensure_ascii=False),
+            json.dumps(after or {}, ensure_ascii=False),
+        ),
+        path=path,
+    )
 
 
 def query(sql: str, params: tuple = (), *, path: Path = DEFAULT_DB) -> list[dict]:

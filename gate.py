@@ -19,7 +19,10 @@ import json
 
 import world
 
-__all__ = ["TIERS", "decide"]
+__all__ = ["APPROVAL_THRESHOLD_CENTS", "TIERS", "decide"]
+
+# 超过这个金额（¥500）的退款需要人工审批，模型无权自行处理
+APPROVAL_THRESHOLD_CENTS = 50000
 
 # 工具 → 风险层级。没列出来的工具视为 R3，默认拒绝。
 TIERS: dict[str, str] = {
@@ -84,6 +87,10 @@ def _check_refund(args: dict, tier: str) -> dict:
         return _deny(tier, "C-NOT-FOUND", f"订单不存在: {order_id}")
 
     order = rows[0]
+    if order["tenant_id"] != world.CURRENT_TENANT:
+        return _deny(tier, "C-CROSSTENANT",
+                     f"订单 {order_id} 属于其他租户，无权操作")
+
     customers = world.query(
         "SELECT status FROM customers WHERE id = ?", (order["customer_id"],))
     if customers and customers[0]["status"] == "closed":
@@ -96,5 +103,10 @@ def _check_refund(args: dict, tier: str) -> dict:
     if amount > remaining:
         return _deny(tier, "C-OVERREFUND",
                      f"退款 ¥{amount / 100:.2f} 超过剩余可退 ¥{remaining / 100:.2f}")
+
+    if amount > APPROVAL_THRESHOLD_CENTS:
+        return _deny(tier, "C-ESCALATE-NOAPPROVAL",
+                     f"退款 ¥{amount / 100:.2f} 超过 ¥{APPROVAL_THRESHOLD_CENTS / 100:.0f}，"
+                     f"需转人工审批")
 
     return _allow(tier)
