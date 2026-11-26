@@ -70,24 +70,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--version", action="version", version=f"mini-harness {__version__}")
     p.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI 兼容端点根地址(默认 %(default)s)")
     p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--workspace", default=".", help="工具可访问的根目录,默认当前目录")
     p.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="最多几轮工具调用")
     p.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS, help="上下文裁剪预算(token)")
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="采样温度,默认 0(工具调用更稳定)")
     p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="单轮输出上限,默认 8192")
-    p.add_argument("--ask", action="store_true", help="每次执行 shell 前人工确认")
-    p.add_argument("--no-shell", action="store_true", help="禁用 run_bash")
-    p.add_argument("--allow-dangerous", action="store_true", help="允许危险命令(慎用)")
     p.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR, help="JSONL 轨迹目录")
     p.add_argument("--reset-world", action="store_true", help="重建客服世界(world.db)并写入种子数据")
     return p.parse_args(argv)
 
 
 def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
-    workspace = Path(args.workspace).resolve()
-    if not workspace.is_dir():
-        sys.exit(f"工作区不存在: {workspace}")
-
     args.trace_dir.mkdir(parents=True, exist_ok=True)
     trace_path = args.trace_dir / time.strftime("run-%Y%m%d-%H%M%S.jsonl")
 
@@ -96,12 +88,7 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
         temperature=args.temperature,
         max_tokens=args.max_tokens,
     )
-    tools = ToolRegistry(
-        workspace,
-        allow_shell=not args.no_shell,
-        ask=args.ask,
-        allow_dangerous=args.allow_dangerous,
-    )
+    tools = ToolRegistry()
     agent = Agent(
         client, tools,
         on_text=print_stream,
@@ -144,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     if "deepseek.com" in args.base_url and not os.environ.get(API_KEY_ENV):
         print(f"[提示] 未设置环境变量 {API_KEY_ENV}，请求可能返回 401。", file=sys.stderr)
 
-    print(f"model={args.model}  workspace={agent.tools.workspace}")
+    print(f"model={args.model}")
     if trace_path:
         print(f"trace={trace_path}")
 

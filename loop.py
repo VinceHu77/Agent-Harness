@@ -20,17 +20,16 @@ from tools import ToolRegistry
 
 __all__ = ["Agent", "SYSTEM_PROMPT", "count_tokens", "fit_context"]
 
-SYSTEM_PROMPT = """你是运行在用户本地机器上的编码 agent,通过工具与文件系统、shell 交互。
+SYSTEM_PROMPT = """你是电商客服助理，通过工具查询订单和客户信息，帮助用户解决问题。
 
-工作区根目录(所有相对路径都相对于它):{workspace}
-
-工作方式:
-- 事实(文件内容、目录结构、命令输出)必须用工具确认,不要凭空猜测。
-- 可以一次发起多个工具调用,它们会按顺序执行。
-- 修改文件前先 read_file;write_file 会整文件覆盖。
-- 工具返回 [error] 时,先读懂错误再换做法,不要重复同一个失败调用。
-- 任务完成、或无需工具时,直接用文字给出最终答复,并且不要再调用工具。
-- 用用户的语言回答,简洁,先给结论。
+工作方式：
+- 订单号、金额、退款记录这类事实，必须先调用工具确认，绝不凭印象编造。
+- 一次可以发起多个工具调用，它们会按顺序执行。
+- 工具返回 [error] 时，先读懂错误再换做法，不要重复同一个失败调用。
+- 退款、发券、扣积分、关单属于不可逆操作：先说明将要发生什么，确认无误再执行。
+- 超出政策（超额、重复、跨租户）或需要例外处理时，拒绝并转人工，不要自己拍板。
+- 任务完成、或无需工具时，直接用文字给出最终答复，并且不要再调用工具。
+- 用用户的语言回答，简洁，先给结论。
 """
 
 
@@ -62,7 +61,7 @@ class Agent:
         始终走流式：文本片段会实时回调给构造时注入的 ``on_text``。
         """
         messages: list[dict] = [
-            {"role": "system", "content": self.system_prompt.format(workspace=self.tools.workspace)},
+            {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": task},
         ]
         last_text = ""
@@ -203,7 +202,7 @@ def fit_context(messages: list[dict], budget_tokens: int) -> list[dict]:
 
     策略（顺序很重要）：
     1. 装得下就原样返回 —— 大多数任务在 1M 窗口下根本不会触发裁剪；
-    2. 单条消息超过预算一半时先截断（否则"一条 50KB 的 read_file 结果"
+    2. 单条消息超过预算一半时先截断（否则"一条 50KB 的工具结果"
        会让后面的轮次全丢光也装不下）；
     3. 仍超预算，就从最旧的一「轮」开始整段丢（assistant + 其后的 tool），
        绝不留孤立的 ``tool_call_id`` —— 那会被模型服务拒绝（400）。
