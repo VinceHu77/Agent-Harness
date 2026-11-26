@@ -68,7 +68,10 @@ python3 harness.py --reset-world
 # 查一个订单
 python3 harness.py "帮我查一下 ORD-1001 这个订单"
 
-# 交互模式
+# 预览退款（不改世界）
+python3 harness.py "ORD-1001 想退 100 元，先帮我看看"
+
+# 交互模式（连续对话，/reset 清空历史，/exit 退出）
 python3 harness.py
 ```
 
@@ -89,6 +92,8 @@ python3 harness.py
 | `--temperature` | `0.0` | 采样温度；工具调用建议 0，写作可调高 |
 | `--max-tokens` | `8192` | 单轮输出上限（deepseek-flash 最大 384K） |
 | `--trace-dir` | `runs` | JSONL 轨迹目录 |
+| `--reset-world` | — | 重建 `world.db` 并写入种子数据 |
+| `--allow-refund` | 关 | 允许 `refund_apply` 真正执行退款 |
 
 ## 客服世界（`world.py`）
 
@@ -148,9 +153,14 @@ world.query("SELECT * FROM orders WHERE id = ?", ("ORD-1001",))
 
 | 工具 | 层级 | 关键行为 |
 | --- | --- | --- |
-| `order_query(order_id)` | R0（只读） | 返回状态、客户、实付/已退/剩余可退、商品；订单不存在返回 `[error]` |
+| `order_query(order_id)` | R0 只读 | 状态、客户、实付/已退/剩余可退、商品；订单不存在返回 `[error]` |
+| `ticket_create(customer_id, subject)` | R1 可逆 | 往 `tickets` 插一行，返回新工单号；客户不存在/空主题返回 `[error]` |
+| `refund_preview(order_id, amount_cents)` | R2 预览 | **不落库**，只返回"退多少、退完剩多少、是否超额" |
+| `refund_apply(order_id, amount_cents)` | R2 执行 | 真正写 `refunded_cents`；**默认关闭**，需 `--allow-refund`；超额直接拒绝 |
 
-后续步骤会按 R0 → R1 → R2 → R3 的顺序补齐：查客户、查政策、建工单、退款预览、退款执行。
+`refund_preview` 是 R2 动作的保护带：模型先把将要发生的事说清楚，确认后才执行。
+`refund_apply` 默认关闭（`--allow-refund` 才开），超额退款会被直接拒绝——
+这是第 8 步 `gate.py` 出现前最笨但有效的门控。
 
 ## 关键设计（这些才是 harness 的「完整」所在）
 
@@ -169,7 +179,9 @@ world.query("SELECT * FROM orders WHERE id = ?", ("ORD-1001",))
 5. **工具只暴露必要的能力。** 客服 agent 没有 shell、没有文件读写——
    最坏情况止步于「退错一笔钱」，而不是执行任意命令。
 6. **可观测。** 每次请求/响应/工具调用写入 `runs/run-*.jsonl`，出问题可回放。
-7. **流式输出（SSE，始终开启）。** `llm.chat(stream=True, on_text=...)` 边收边打印；
+7. **会话有记忆。** `Agent.messages` 跨多次 `run()` 保留，所以「先问一句、再答『确认』」
+   是同一段对话；`reset()` / REPL 的 `/reset` 清空。一次性任务不受影响。
+8. **流式输出（SSE，始终开启）。** `llm.chat(stream=True, on_text=...)` 边收边打印；
    工具调用按 `index` 分片累积后还原成完整的 `ToolCall`。若服务端忽略 `stream`
    返回普通 JSON，会自动退回非流式解析。流式中途断开不重试（避免重复输出）。
 

@@ -54,34 +54,37 @@ class Agent:
         self.max_turns = max_turns
         self.context_tokens = context_tokens
         self.on_event = on_event
+        self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+    def reset(self) -> None:
+        """清空对话历史（保留 system prompt）。"""
+        self.messages = [{"role": "system", "content": self.system_prompt}]
 
     def run(self, task: str) -> str:
-        """执行一个任务，返回最终答复（或失败说明）。
+        """在**已有历史**上追加一轮，返回最终答复（或失败说明）。
 
-        始终走流式：文本片段会实时回调给构造时注入的 ``on_text``。
+        历史由 ``self.messages`` 持有：REPL 里连续两句话是同一段对话，
+        所以「先说确认，再回一句确认」才能成立。``reset()`` 清空。
         """
-        messages: list[dict] = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": task},
-        ]
+        self.messages.append({"role": "user", "content": task})
         last_text = ""
 
         for turn in range(1, self.max_turns + 1):
-            before_tokens = count_tokens(messages)
-            fitted = fit_context(messages, self.context_tokens)
-            if len(fitted) != len(messages):
+            before_tokens = count_tokens(self.messages)
+            fitted = fit_context(self.messages, self.context_tokens)
+            if len(fitted) != len(self.messages):
                 self._emit(
                     "context", turn=turn,
                     before_tokens=before_tokens,
                     after_tokens=count_tokens(fitted),
-                    dropped=len(messages) - len(fitted),
+                    dropped=len(self.messages) - len(fitted),
                 )
-            messages = fitted
-            self._emit("request", turn=turn, messages=messages)
+                self.messages = fitted       # 裁剪是永久的，防止历史无限增长
+            self._emit("request", turn=turn, messages=self.messages)
 
             try:
                 comp = self.client.chat(
-                    messages,
+                    self.messages,
                     tools=self.tools.schemas(),
                     stream=True,
                     on_text=self.on_text,
@@ -108,7 +111,7 @@ class Agent:
                     }
                     for c in comp.tool_calls
                 ]
-            messages.append(assistant)
+            self.messages.append(assistant)
 
             if not comp.tool_calls:
                 if comp.finish_reason == "length":
@@ -124,7 +127,7 @@ class Agent:
                     "tool", turn=turn, name=call.name,
                     arguments=call.arguments, result=result,
                 )
-                messages.append(
+                self.messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
 

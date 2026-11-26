@@ -40,7 +40,8 @@ class Tool:
 class ToolRegistry:
     """工具集合。内置工具由 cstools 注册，测试/扩展可以用 ``add()`` 追加。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_refund: bool = False) -> None:
+        self.allow_refund = allow_refund
         self._tools: dict[str, Tool] = {}
         self._register_cs_tools()
 

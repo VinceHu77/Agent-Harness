@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-__all__ = ["DEFAULT_DB", "connect", "init_schema", "reset", "seed", "query"]
+__all__ = ["DEFAULT_DB", "connect", "execute", "init_schema", "insert", "reset", "seed", "query"]
 
 DEFAULT_DB = Path("world.db")
 
@@ -127,5 +127,27 @@ def query(sql: str, params: tuple = (), *, path: Path = DEFAULT_DB) -> list[dict
     try:
         rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def insert(sql: str, params: tuple = (), *, path: Path = DEFAULT_DB) -> int:
+    """执行 INSERT，返回新行的 id。"""
+    conn = connect(path)
+    try:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def execute(sql: str, params: tuple = (), *, path: Path = DEFAULT_DB) -> int:
+    """执行 UPDATE/DELETE，返回受影响的行数。"""
+    conn = connect(path)
+    try:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()

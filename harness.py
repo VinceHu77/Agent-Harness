@@ -76,6 +76,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="单轮输出上限,默认 8192")
     p.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR, help="JSONL 轨迹目录")
     p.add_argument("--reset-world", action="store_true", help="重建客服世界(world.db)并写入种子数据")
+    p.add_argument("--allow-refund", action="store_true",
+                   help="允许 refund_apply 真正执行退款(默认关闭)")
     return p.parse_args(argv)
 
 
@@ -88,7 +90,7 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
         temperature=args.temperature,
         max_tokens=args.max_tokens,
     )
-    tools = ToolRegistry()
+    tools = ToolRegistry(allow_refund=args.allow_refund)
     agent = Agent(
         client, tools,
         on_text=print_stream,
@@ -104,7 +106,8 @@ def print_stream(piece: str) -> None:
 
 
 def repl(agent: Agent) -> None:
-    print("交互模式:输入任务,/exit 退出。")
+    """交互模式：连续对话，/reset 清空历史，/exit 退出。"""
+    print("交互模式:输入任务,/reset 清空对话,/exit 退出。")
     while True:
         try:
             task = input("\n你> ").strip()
@@ -113,6 +116,10 @@ def repl(agent: Agent) -> None:
             return
         if task in ("/exit", "exit", "quit"):
             return
+        if task == "/reset":
+            agent.reset()
+            print("对话已重置。")
+            continue
         if not task:
             continue
         agent.run(task)
