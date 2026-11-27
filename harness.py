@@ -42,8 +42,9 @@ def one_line(text: str, n: int) -> str:
 
 
 class Tracer:
-    def __init__(self, trace_path: Path | None) -> None:
+    def __init__(self, trace_path: Path | None, show_usage: bool = False) -> None:
         self.trace_path = trace_path
+        self.show_usage = show_usage
 
     def __call__(self, event: dict) -> None:
         kind = event["kind"]
@@ -52,6 +53,16 @@ class Tracer:
         elif kind == "response":
             if event["tool_calls"] and event.get("content"):
                 print()  # 流式文本刚打完，换行再打工具调用
+            usage = event.get("usage") or {}
+            if self.show_usage and usage.get("prompt_tokens"):
+                print(f"  · tokens prompt={usage['prompt_tokens']} "
+                      f"completion={usage.get('completion_tokens', 0)} "
+                      f"cache_hit={usage.get('prompt_cache_hit_tokens', 0)}")
+
+        elif kind == "context":
+            if event.get("over_budget"):
+                print(f"  [warning] 上下文 {event['prompt_tokens']} tokens "
+                      f"超过预算 {event['budget']}（未裁剪，建议 /reset 或调大 --context-tokens）")
             for call in event["tool_calls"]:
                 print(f"  → {call['name']}({one_line(call['arguments'], 160)})")
         elif kind == "tool":
@@ -71,11 +82,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI 兼容端点根地址(默认 %(default)s)")
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="最多几轮工具调用")
-    p.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS, help="上下文裁剪预算(token)")
+    p.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS,
+                   help="prompt_tokens 告警阈值(超过只告警,不裁剪)")
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="采样温度,默认 0(工具调用更稳定)")
     p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="单轮输出上限,默认 8192")
     p.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR, help="JSONL 轨迹目录")
     p.add_argument("--reset-world", action="store_true", help="重建客服世界(world.db)并写入种子数据")
+    p.add_argument("--show-usage", action="store_true", help="每轮打印服务端返回的 token 用量")
     return p.parse_args(argv)
 
 
@@ -94,7 +107,7 @@ def build_agent(args: argparse.Namespace) -> tuple[Agent, Path | None]:
         on_text=print_stream,
         max_turns=args.max_turns,
         context_tokens=args.context_tokens,
-        on_event=Tracer(trace_path),
+        on_event=Tracer(trace_path, show_usage=args.show_usage),
     )
     return agent, trace_path
 
@@ -122,6 +135,7 @@ def repl(agent: Agent) -> None:
             continue
         agent.run(task)
         print()              # 流式内容已经打过了，只补一个换行
+        print(f"[usage] {agent.usage_report()}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.task:
         agent.run(" ".join(args.task))
         print()              # 流式内容已经打过了，只补一个换行
+        print(f"[usage] {agent.usage_report()}")
         return 0
 
     repl(agent)

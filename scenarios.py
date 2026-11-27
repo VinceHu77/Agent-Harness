@@ -167,6 +167,7 @@ def _read_trace(path: Path) -> list[dict]:
 
 def main() -> int:
     mode = "fake" if "--fake" in sys.argv else "live" if "--live" in sys.argv else "list"
+    mode = "live"
 
     if mode == "list":
         for case in CASES:

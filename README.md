@@ -1,7 +1,7 @@
 # Mini Harness
 
 一个**最小但完整**的 agent harness，约 700 行（含注释）。只依赖标准库；
-`tiktoken` 是**可选、默认关闭**的依赖（开启后用于精确 token 计数，否则用字符估算）。
+不做本地 token 计算：上下文大小直接读服务端返回的 `usage.prompt_tokens`。
 默认连 DeepSeek 云端，也可以直接指向本机 `llama-server` 或其他 OpenAI 兼容服务。
 
 > harness 不是模型，也不是 prompt。它是把「只会生成 token 的模型」变成
@@ -12,7 +12,7 @@
 | 路径 | 层 | 职责 |
 | --- | --- | --- |
 | `harness.py` | 入口层 | CLI / REPL、参数解析、终端打印 + JSONL 轨迹日志 |
-| `loop.py` | 循环层 | Agent 状态机：拼上下文、调模型、执行工具、回填结果、停止条件；`fit_context()` 按 token 预算裁剪 |
+| `loop.py` | 循环层 | Agent 状态机：拼上下文、调模型、执行工具、回填结果、停止条件；超预算只告警 |
 | `tools.py` | 工具层 | 工具注册表：schema、执行、错误回填、输出截断 |
 | `cstools.py` | 工具实现 | 客服工具（`order_query` / `ticket_create` / `refund_preview` / `refund_apply`） |
 | `gate.py` | 门控层 | 风险层级表 + 不变量判定：`allow` / `deny`（fail-closed） |
@@ -20,7 +20,7 @@
 | `world.py` | 世界层 | 客服世界（SQLite）：客户 / 订单 / 优惠券 / 工单；建表、种子数据、只读查询 |
 | `llm.py` | 模型层 | OpenAI 兼容客户端；重试、响应归一化成 `Completion` / `ToolCall` |
 | `runs/` | 产物 | 每次运行的 `run-YYYYmmdd-HHMMSS.jsonl` 轨迹 |
-| `requirements.txt` | 依赖 | 唯一可选依赖 `tiktoken` |
+| `requirements.txt` | 依赖 | 无（只用标准库） |
 | `.gitignore` | 忽略 | `runs/`、`__pycache__/`、本地备份 |
 
 ## 架构
@@ -35,7 +35,7 @@ flowchart TB
 
     subgraph loop["循环层 loop.py"]
         AGENT["Agent.run(task)"]
-        CTX["fit_context()<br/>按 token 预算裁剪"]
+        CTX["预算告警<br/>usage.prompt_tokens"]
         HIST[("messages 历史<br/>跨 run 保留")]
     end
 
@@ -77,7 +77,7 @@ flowchart TB
 
 | 路径 | 含义 |
 | --- | --- |
-| `Agent.run → ChatClient → 模型` | 每一轮都把裁剪后的历史 + 工具 schema 发给模型 |
+| `Agent.run → ChatClient → 模型` | 每一轮都把完整历史 + 工具 schema 发给模型 |
 | `模型返回 tool_calls → decide → Registry → cstools` | **allow** 才真正执行；**deny** 直接把原因当成工具结果回填 |
 | `cstools → world.db` | 只有过了门控的调用才可能写库；`refund_apply` 成功后写 `ledger` |
 
@@ -95,7 +95,7 @@ flowchart TB
 │      ▲                            │是                         │
 │      └── tool 消息 ◄── gate ──► tools.call() ◄─────────────────┤
 │                                                               │
-│   每轮前置: fit_context() 按 token 预算丢最旧的整轮            │
+│   每轮前置: 检查上轮 usage，超预算只告警                       │
 ├───────────────────────────────┬───────────────────────────────┤
 │ tools.py  Registry + cstools   │ llm.py  ChatClient            │
 │ 注册/执行/错误回填/截断         │ 重试/SSE/归一化                │
@@ -237,10 +237,8 @@ Agent(client, tools, on_text=...)
 ├─ reset()                         messages = [system]
 └─ run(task)
     ├─ messages.append(user)       历史跨多次 run 保留
-    ├─ 每轮 fit_context(messages, context_tokens)
-    │   ├─ 装得下 → 原样
-    │   ├─ 单条 > 预算一半 → _truncate_message()
-    │   └─ 仍超 → 从最旧整轮丢（发 context 事件）
+    ├─ 每轮 _warn_if_over_budget()
+    │   └─ 用上轮 usage.prompt_tokens 与阈值比较，超了发 context 事件（不裁剪）
     ├─ client.chat(stream=True, on_text=...)
     ├─ 没有 tool_calls → 返回文本（结束）
     └─ 有 tool_calls，逐个处理：
@@ -248,8 +246,7 @@ Agent(client, tools, on_text=...)
         ├─ tools.call()            allow → 真正执行
         └─ 追加 role=tool
 
-count_tokens() / _text_tokens() / _encoder()
-                                   tiktoken 可选（默认关，避免首次加载卡住）
+（无 token 计算：大小一律以服务端 usage 为准）
 ```
 
 ### `llm.py` — 模型客户端
@@ -308,9 +305,7 @@ main()
 ## 快速开始
 
 ```bash
-# 依赖：Python 3.10+，一个 OpenAI 兼容服务；tiktoken 可选且默认关闭
-pip install -r requirements.txt      # 可跳过，不装则用字符估算 token
-# 想要精确 token 计数：export MINI_HARNESS_TOKENIZER=on
+# 依赖：Python 3.10+，一个 OpenAI 兼容服务（无第三方依赖）
 
 # 默认连 DeepSeek：Key 只从环境变量读取（不写进代码）
 export DEEPSEEK_API_KEY=sk-...
@@ -341,11 +336,12 @@ python3 harness.py
 | `--base-url` | `$LLAMA_BASE_URL` 或 `https://api.deepseek.com` | API 根地址，自动拼 `/chat/completions` |
 | `--model` | `$LLAMA_MODEL` 或 `deepseek-flash` | 模型名 |
 | `--max-turns` | `20` | 最多几轮工具调用（每轮都重发上下文，轮数越多越贵） |
-| `--context-tokens` | `64000` | 上下文裁剪预算（token） |
+| `--context-tokens` | `64000` | `prompt_tokens` 告警阈值（超过只告警，不裁剪） |
 | `--temperature` | `0.0` | 采样温度；工具调用建议 0，写作可调高 |
 | `--max-tokens` | `8192` | 单轮输出上限（deepseek-flash 最大 384K） |
 | `--trace-dir` | `runs` | JSONL 轨迹目录 |
 | `--reset-world` | — | 重建 `world.db` 并写入种子数据 |
+| `--show-usage` | 关 | 每轮打印服务端返回的 token 用量 |
 
 ## 客服世界（`world.py`）
 
@@ -392,16 +388,31 @@ world.query("SELECT * FROM orders WHERE id = ?", ("ORD-1001",))
 > 计费参考（off-peak）：输入缓存命中 $0.003/1M、未命中 $0.15/1M、输出 $0.6/1M。
 > 只要前面几轮的消息不变，后续请求会命中前缀缓存，成本远低于按未命中估算。
 
+## Token 用量（`usage`）
+
+token 数只以服务端返回的 `usage` 为准——本地**不做任何 token 计算**。
+每次请求都会把它记录下来：
+
+```python
+agent.last_usage     # 最近一次：{'prompt_tokens': 640, 'completion_tokens': 9,
+                     #              'total_tokens': 649, 'prompt_cache_hit_tokens': 512}
+agent.usage_report() # 本会话累计："prompt=1160 completion=27 total=1187 cache_hit=912"
+```
+
+- 每轮结束都会打印一行 `[usage] ...` 汇总；
+- 加 `--show-usage` 可以逐轮看到 prompt / completion / 缓存命中量；
+- 超过 `--context-tokens` 时只打印一行 `[warning]`，**不裁剪历史**；
+- 流式请求靠 `stream_options: {"include_usage": true}` 拿到 usage（不加会永远是空）。
+
+`prompt_cache_hit_tokens` 是 DeepSeek 的前缀缓存命中量，命中部分按 1/50 价格计费，
+所以「估算总 token」和「实际花费」不是线性关系，看账单要结合这一项。
+
 ## 环境变量
 
 | 变量 | 作用 | 默认 |
 | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | 调用 deepseek.com 时的 Key | 空（请求会 401） |
 | `LLAMA_BASE_URL` / `LLAMA_MODEL` | 覆盖默认端点/模型 | deepseek |
-| `MINI_HARNESS_TOKENIZER` | 设为 `on` 时用 tiktoken 精确计数；否则按 2 字符≈1 token 估算 | `off` |
-
-`MINI_HARNESS_TOKENIZER` 只影响**上下文裁剪的估算**，不影响模型计费。
-开启后首次会加载 tiktoken 词表（几秒，可能联网），之后走本地缓存。
 
 ## 内置工具
 
@@ -454,12 +465,10 @@ python3 scenarios.py --live     # 真实模型（需要 DEEPSEEK_API_KEY）
 
 1. **错误也是上下文。** 工具抛异常、参数 JSON 坏了、路径越界、未知工具，一律转成
    `[error] ...` 字符串回填给模型。模型看到错误才能自纠；静默失败则循环卡死。
-2. **上下文预算按 token 算，分三步裁剪。** `count_tokens()` 按「每条消息 +4、
-   末尾 +2」的官方口径统计（默认字符估算，开 `MINI_HARNESS_TOKENIZER=on` 用 tiktoken）。
-   装得下就原样返回；装不下先把**单条超过预算一半**的消息截断（否则一条 50KB 的
-   `read_file` 结果会让后面全丢光也装不下）；仍超预算才从最旧的**整轮**
-   （assistant + 其后的 tool 消息）开始丢，绝不留孤立的 `tool_call_id`，
-   并始终保留 system 和第一条任务描述。被裁剪时会发一条 `context` trace 事件。
+2. **上下文大小以服务端为准。** 本地不数 token：每轮结束后读 `usage.prompt_tokens`，
+   下一轮开头发一条超出预算的告警（`context` 事件），**不裁剪历史**。
+   第一轮没有历史数据，直接裸发。取舍：牺牲"提前防御"，换来"不猜、不误删"，
+   而且数字和服务端计费完全一致。
 3. **停止条件。** 模型不再调工具 / 达到 `--max-turns` / 模型服务异常（`LLMError`）。
    没有它们，弱模型会无限调用工具。另外 `finish_reason == "length"` 时会在答复后
    追加一句「可能被截断」的提示。
@@ -484,7 +493,7 @@ python3 scenarios.py --live     # 真实模型（需要 DEEPSEEK_API_KEY）
 {"t":"10:23:58","kind":"tool","turn":1,"name":"order_query","arguments":"...","result":"订单 ORD-1001（已支付）..."}
 ```
 
-`request` 事件里存的是**裁剪后**的消息，所以「模型到底看到了什么」是可复查的。
+`request` 事件里存的就是实际发出的消息，所以「模型到底看到了什么」是可复查的。
 
 ## 已知限制
 
@@ -494,17 +503,16 @@ python3 scenarios.py --live     # 真实模型（需要 DEEPSEEK_API_KEY）
 - **门控只覆盖退款。** `gate.py` 目前只对 `refund_apply` 做规则判定；
   发券、扣积分、关单等工具加入时要补对应的不变量。
 - 没有跨任务记忆、没有子 agent / MCP / 审批 UI / 评测集。
-- token 计数默认是**字符估算**（2 字符 ≈ 1 token），不是目标模型的真实分词；
-  需要精确值时开 `MINI_HARNESS_TOKENIZER=on`（并 `pip install tiktoken`）。
-  这么做是为了避免 tiktoken 首次加载词表时联网卡住启动（实测可超过 60 秒）。
+- **不做主动裁剪。** 上下文只告警不裁：长会话会一直涨到模型窗口上限，
+  那时请求会失败。需要时手动 `/reset`，或把 `--context-tokens` 调小观察增长。
 - trace 会持续增长；`runs/` 已加入 `.gitignore`，只保留想作为样例的几条即可。
 
 ## 扩展路线
 
 | 方向 | 落点 |
 | --- | --- |
-| 上下文压缩 | `loop.py` 的 `fit_context`：超预算时先让模型摘要旧轮次 |
-| 精确分词 | `_size()` 换成目标模型的 tokenizer（llama-server 可查 `/tokenize`） |
+| 上下文压缩 | 超预算时让模型摘要旧轮次（现在只告警不处理） |
+| 主动裁剪 | 用 `usage.prompt_tokens` 触发，按消息条数砍中间（注意保留 system 与首条 user） |
 | 更多工具 | `tools.py` 的 `add()`；MCP server 可适配成一批 `Tool` |
 | 子 agent | `Agent` 本身封装成 `spawn_agent(task)` 工具 |
 | 审批/审计 | `ToolRegistry._confirm` + trace 里记录批准链 |
