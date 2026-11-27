@@ -25,6 +25,66 @@
 
 ## 架构
 
+```mermaid
+flowchart TB
+    subgraph entry["入口层"]
+        CLI["harness.py<br/>parse_args / build_agent"]
+        REPL["repl()<br/>/reset  /exit"]
+        TRACE["Tracer<br/>runs/run-*.jsonl"]
+    end
+
+    subgraph loop["循环层 loop.py"]
+        AGENT["Agent.run(task)"]
+        CTX["fit_context()<br/>按 token 预算裁剪"]
+        HIST[("messages 历史<br/>跨 run 保留")]
+    end
+
+    subgraph gate["门控层 gate.py"]
+        DECIDE{"decide(tool, args)"}
+        RULES["TIERS + 不变量<br/>C-OVERREFUND / C-CROSSTENANT<br/>C-CLOSED / C-ESCALATE..."]
+    end
+
+    subgraph tools["工具层"]
+        REG["tools.py ToolRegistry.call()<br/>错误回填 + 截断"]
+        CS["cstools.py<br/>order_query / ticket_create<br/>refund_preview / refund_apply"]
+    end
+
+    subgraph world["数据层 world.py"]
+        DB[("world.db<br/>customers / orders<br/>coupons / tickets / ledger")]
+    end
+
+    LLM["llm.py ChatClient<br/>SSE 流式 / 重试 / 归一化"]
+    API(["OpenAI 兼容服务<br/>api.deepseek.com 或本地"]) 
+
+    CLI --> AGENT
+    REPL --> AGENT
+    AGENT --> CTX --> HIST
+    AGENT -->|每轮请求| LLM
+    LLM <-->|HTTP POST /chat/completions| API
+    LLM -->|tool_calls| DECIDE
+    DECIDE -->|allow| REG
+    DECIDE -->|deny| DENIED["[error] 已拒绝（规则）：原因"]
+    DECIDE --- RULES
+    REG --> CS
+    CS -->|query / insert / execute| DB
+    CS -->|log_action| DB
+    DENIED -->|作为 tool 消息回填| HIST
+    REG -->|工具结果| HIST
+    AGENT -->|事件流| TRACE
+```
+
+图里三条路径各自代表什么：
+
+| 路径 | 含义 |
+| --- | --- |
+| `Agent.run → ChatClient → 模型` | 每一轮都把裁剪后的历史 + 工具 schema 发给模型 |
+| `模型返回 tool_calls → decide → Registry → cstools` | **allow** 才真正执行；**deny** 直接把原因当成工具结果回填 |
+| `cstools → world.db` | 只有过了门控的调用才可能写库；`refund_apply` 成功后写 `ledger` |
+
+被拒绝的工具调用不会中断循环——它以 `[error]` 的形式回到历史里，模型会据此向客户解释。
+
+### 简化视图
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ harness.py     CLI / REPL / trace 日志                        │
@@ -33,7 +93,7 @@
 │                                                               │
 │   messages ──► llm.chat() ──► 有 tool_calls? ──否──► 最终答复   │
 │      ▲                            │是                         │
-│      └──── tool 消息 ◄── tools.call() ◄───────────────────────┤
+│      └── tool 消息 ◄── gate ──► tools.call() ◄─────────────────┤
 │                                                               │
 │   每轮前置: fit_context() 按 token 预算丢最旧的整轮            │
 ├───────────────────────────────┬───────────────────────────────┤
@@ -53,6 +113,197 @@
 2. POST 请求，带上 `tools`（JSON Schema）和 `tool_choice: auto`
 3. 模型返回 `tool_calls` → 逐个执行 → 追加 `role=tool` + `tool_call_id`
 4. 回到第 2 步；直到模型**不再调用工具**，它的文字就是最终答复
+
+## 代码导览（每个文件的函数）
+
+下面按「调用谁 → 做什么」列出每个脚本的函数，方便改代码时定位。
+
+一次工具调用跨文件的路径：
+
+```
+harness.main
+└─ loop.Agent.run
+   ├─ gate.decide ──────────────► world.query      （只读，判定用）
+   └─ tools.ToolRegistry.call
+      └─ cstools.<工具函数>
+         └─ world.query / insert / execute / log_action
+            └─ world.db（SQLite）
+```
+
+### `world.py` — 数据层
+
+```
+reset()
+├─ connect()                       打开 world.db，row_factory=Row（可 row["id"]）
+├─ DROP TABLE × 5                  清空 ledger / tickets / coupons / orders / customers
+├─ close()
+├─ init_schema()
+│   ├─ connect()
+│   ├─ executescript(SCHEMA)       建 5 张表（IF NOT EXISTS，可重复执行）
+│   └─ close()
+└─ seed()
+    ├─ connect()
+    ├─ executemany(INSERT OR IGNORE × 3)   4 客户 / 7 订单 / 2 券（幂等）
+    └─ close()
+```
+
+| 函数 | 说明 |
+| --- | --- |
+| `connect(path)` | 建连接并设置 `row_factory`；调用方负责 `close()` |
+| `init_schema(path)` | 只建表，不动数据；老库也能补建新表 |
+| `seed(path)` | 灌种子数据；用 `INSERT OR IGNORE`，重复跑不会重复插 |
+| `reset(path)` | 删表 → 建表 → 灌数据；命令行 `--reset-world` 调它 |
+| `insert(sql, params)` | 只用于 `INSERT`，返回新行 `id`（工单号、账本号） |
+| `execute(sql, params)` | 只用于 `UPDATE/DELETE`，返回受影响行数（退款用它判断是否命中） |
+| `log_action(...)` | 往 `ledger` 插一条审计记录（工具、参数、决策、before/after） |
+| `query(sql, params)` | 只读查询，返回 `dict` 列表 |
+
+> `insert` 和 `execute` 分开，是因为 SQLite 里 `lastrowid` 在 `UPDATE` 之后不可靠：
+> 拿它判断"有没有更新到行"会永远为真。
+
+### `cstools.py` — 客服工具
+
+```
+order_query(order_id)
+├─ world.query(orders WHERE id)    查不到 → [error] 订单不存在
+├─ 租户校验                          tenant_id != T1 → [error] 无权访问
+└─ 格式化                            状态中文化、金额转元、拼商品列表
+
+ticket_create(customer_id, subject)
+├─ world.query(customers)          查不到 → [error] 客户不存在
+├─ 主题 strip 后为空 → [error]
+└─ world.insert(tickets)           返回 "已创建工单 #N"
+
+refund_preview(order_id, amount_cents)
+├─ world.query(orders)             不存在 / 跨租户 → [error]
+├─ 金额校验                        int、> 0
+├─ 计算                            after = refunded + amount；remaining = paid - after
+└─ 返回预览文本                    **不写库**
+
+refund_apply(order_id, amount_cents)
+├─ 再查一次订单                    防止 gate 判定与执行之间世界变了
+├─ 金额与余额校验                  超额 → [error]
+├─ world.execute(UPDATE ... WHERE refunded_cents + ? <= paid_cents)
+│                                  带条件的更新，命中 0 行说明状态已变
+├─ world.log_action(...)           记录 before / after
+└─ 返回 "已退款 ¥X，累计 ¥Y，剩余 ¥Z"
+
+register_cs_tools(registry)
+└─ registry.add(Tool × 4)          每个 Tool = 名字 + 英文描述 + JSON Schema + 函数
+```
+
+### `gate.py` — 门控
+
+```
+decide(tool_name, raw_args)
+├─ TIERS.get(tool_name)            不在表里 → deny C-UNKNOWN-TOOL（fail-closed）
+├─ _parse(raw_args)                JSON 坏了 → allow（让 tools.call 报标准错误）
+├─ tier 是 R0/R1 → allow
+└─ refund_apply → _check_refund()
+    ├─ C-BAD-ARGS                  缺 order_id
+    ├─ C-BAD-AMOUNT                金额非整数或 ≤ 0
+    ├─ C-NOT-FOUND                 订单不存在
+    ├─ C-CROSSTENANT               订单不属于 T1
+    ├─ C-CLOSED                    客户已注销 / 订单已关闭
+    ├─ C-OVERREFUND                超过剩余可退
+    └─ C-ESCALATE-NOAPPROVAL       单笔 > ¥500，需人工审批
+```
+
+`decide()` 返回 `{"decision", "tier", "rule", "reason"}`；`loop.py` 只在 `allow` 时才真正执行。
+
+### `tools.py` — 注册表
+
+```
+ToolRegistry()
+├─ _register_cs_tools()            → cstools.register_cs_tools(self)
+├─ schemas()                       → OpenAI tools 数组（发给模型）
+├─ names()                         → 工具名列表
+├─ add(tool)                       → 覆盖式注册
+└─ call(name, raw_args)
+    ├─ 未知工具 → [error]
+    ├─ json.loads 失败 → [error] 参数不是合法 JSON
+    ├─ tool.fn(**args)
+    │   ├─ TypeError → [error] 参数不匹配
+    │   └─ Exception → [error] 类型: 消息
+    └─ clip(result, 8000)          截断后回填
+```
+
+`call()` 永远返回字符串、从不抛异常——这是"模型看到错误能自纠"的前提。
+
+### `loop.py` — 循环
+
+```
+Agent(client, tools, on_text=...)
+├─ reset()                         messages = [system]
+└─ run(task)
+    ├─ messages.append(user)       历史跨多次 run 保留
+    ├─ 每轮 fit_context(messages, context_tokens)
+    │   ├─ 装得下 → 原样
+    │   ├─ 单条 > 预算一半 → _truncate_message()
+    │   └─ 仍超 → 从最旧整轮丢（发 context 事件）
+    ├─ client.chat(stream=True, on_text=...)
+    ├─ 没有 tool_calls → 返回文本（结束）
+    └─ 有 tool_calls，逐个处理：
+        ├─ gate.decide()           deny → 回填 "[error] 已拒绝（规则）：原因"
+        ├─ tools.call()            allow → 真正执行
+        └─ 追加 role=tool
+
+count_tokens() / _text_tokens() / _encoder()
+                                   tiktoken 可选（默认关，避免首次加载卡住）
+```
+
+### `llm.py` — 模型客户端
+
+```
+ChatClient(base_url, model, ...)
+├─ chat(messages, tools, stream=True, on_text)
+│   ├─ 组装 payload                temperature / max_tokens / thinking=disabled
+│   └─ _post_with_retry()
+│       ├─ stream → _post_stream()
+│       │   ├─ Content-Type: text/event-stream → _consume_stream()
+│       │   │   ├─ 文本片段 → on_text()
+│       │   │   ├─ tool_calls 按 index 累积
+│       │   │   └─ usage / finish_reason
+│       │   └─ 服务端返回 JSON（忽略 stream）→ _parse()
+│       └─ 非流式 → _post() → _parse()
+└─ 重试                            网络错误退避 2 次；已输出过内容则不重试
+```
+
+### `harness.py` — 入口
+
+```
+main()
+├─ parse_args()
+├─ world.reset()                   仅 --reset-world
+├─ build_agent()
+│   ├─ ChatClient(base_url, model, temperature, max_tokens)
+│   ├─ ToolRegistry()
+│   └─ Agent(..., on_text=print_stream)
+├─ 一次性任务 → agent.run(task)
+└─ repl(agent)
+    ├─ /reset → agent.reset()
+    ├─ /exit  → return
+    └─ agent.run(task)             print_stream 边收边打
+
+Tracer(event)                      → 终端打印 + 追加 runs/run-*.jsonl
+```
+
+### `scenarios.py` — 攻击评测
+
+```
+main()
+├─ --fake → run_fake(case)
+│   ├─ world.reset()
+│   ├─ decide() → allow 才 tools.call()
+│   └─ case.check()                检查订单 refunded_cents
+└─ --live → run_live(case)
+    ├─ world.reset()
+    ├─ Agent(..., on_event=Recorder(runs/scenarios/<id>.jsonl))
+    ├─ agent.run(case.task)
+    └─ case.check()
+```
+
+`--fake` 验证 gate 逻辑（确定性、免费）；`--live` 验证模型 + gate 的联合表现。
 
 ## 快速开始
 
